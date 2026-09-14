@@ -1,0 +1,458 @@
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import express, { type NextFunction, type Request, type Response } from 'express'
+import cors from 'cors'
+import { applyStockDelta, db, getSnapshot, migrate, nowIso, rowProduct } from './db.js'
+import { hashPassword, seedIfEmpty } from './seed.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const SECRET = process.env.LAXMI_SECRET || 'laxmi-fashion-dev-secret'
+const PORT = Number(process.env.PORT || 8787)
+
+type Authed = Request & {
+  user?: { id: string; username: string; role: string; name: string }
+}
+
+function signToken(user: { id: string; username: string; role: string; name: string }) {
+  const payload = Buffer.from(
+    JSON.stringify({ ...user, exp: Date.now() + 30 * 24 * 3600 * 1000 }),
+  ).toString('base64url')
+  const sig = crypto.createHmac('sha256', SECRET).update(payload).digest('base64url')
+  return `${payload}.${sig}`
+}
+
+function verifyToken(token: string) {
+  const [payload, sig] = token.split('.')
+  if (!payload || !sig) return null
+  const expected = crypto.createHmac('sha256', SECRET).update(payload).digest('base64url')
+  const a = Buffer.from(sig)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString())
+    if (!data?.id || data.exp < Date.now()) return null
+    return data as { id: string; username: string; role: string; name: string }
+  } catch {
+    return null
+  }
+}
+
+function auth(req: Authed, res: Response, next: NextFunction) {
+  const h = req.headers.authorization || ''
+  const token = h.startsWith('Bearer ') ? h.slice(7) : ''
+  const user = token ? verifyToken(token) : null
+  if (!user) return res.status(401).json({ error: 'Unauthorized' })
+  req.user = user
+  next()
+}
+
+function ownerOnly(req: Authed, res: Response, next: NextFunction) {
+  if (req.user?.role !== 'owner') return res.status(403).json({ error: 'Owner only' })
+  next()
+}
+
+migrate()
+const seeded = seedIfEmpty()
+
+const app = express()
+app.use(cors())
+app.use(express.json({ limit: '2mb' }))
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, name: 'Laxmi Fashion Wholesale Mart', time: nowIso() })
+})
+
+app.post('/api/auth/login', (req, res) => {
+  const username = String(req.body?.username || '').trim().toLowerCase()
+  const password = String(req.body?.password || '')
+  const user = db
+    .prepare('SELECT * FROM users WHERE username = ?')
+    .get(username) as
+    | { id: string; username: string; password_hash: string; role: string; name: string }
+    | undefined
+  if (!user || user.password_hash !== hashPassword(password)) {
+    return res.status(401).json({ error: 'Invalid username or password' })
+  }
+  const publicUser = { id: user.id, username: user.username, role: user.role, name: user.name }
+  res.json({ token: signToken(publicUser), user: publicUser })
+})
+
+app.get('/api/auth/me', auth, (req: Authed, res) => {
+  res.json({ user: req.user })
+})
+
+app.get('/api/snapshot', auth, (_req, res) => {
+  res.json(getSnapshot())
+})
+
+app.put('/api/store', auth, ownerOnly, (req: Authed, res) => {
+  const { name, address, phone, city } = req.body || {}
+  db.prepare(
+    'UPDATE store_profile SET name = ?, address = ?, phone = ?, city = ?, updated_at = ? WHERE id = ?',
+  ).run(
+    String(name || 'Laxmi Fashion Wholesale Mart'),
+    address ?? '',
+    phone ?? '',
+    city ?? '',
+    nowIso(),
+    'store-1',
+  )
+  res.json({ ok: true })
+})
+
+function upsertProduct(p: Record<string, unknown>) {
+  const id = String(p.id)
+  const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(id)
+  const t = String(p.updatedAt || nowIso())
+  if (existing) {
+    db.prepare(
+      `UPDATE products SET sku=@sku, name=@name, type=@type, unit=@unit,
+        selling_price=@selling_price, cost_price=@cost_price, quantity=@quantity,
+        low_stock_threshold=@low_stock_threshold, fabric_sell_unit=@fabric_sell_unit,
+        updated_at=@updated_at, deleted_at=@deleted_at WHERE id=@id`,
+    ).run({
+      id,
+      sku: p.sku,
+      name: p.name,
+      type: p.type,
+      unit: p.unit,
+      selling_price: p.sellingPrice,
+      cost_price: p.costPrice,
+      quantity: p.quantity ?? 0,
+      low_stock_threshold: p.lowStockThreshold ?? 5,
+      fabric_sell_unit: p.fabricSellUnit ?? null,
+      updated_at: t,
+      deleted_at: p.deletedAt ?? null,
+    })
+    db.prepare('DELETE FROM product_sizes WHERE product_id = ?').run(id)
+  } else {
+    db.prepare(
+      `INSERT INTO products (id, sku, name, type, unit, selling_price, cost_price, quantity,
+        low_stock_threshold, fabric_sell_unit, created_at, updated_at, deleted_at)
+       VALUES (@id, @sku, @name, @type, @unit, @selling_price, @cost_price, @quantity,
+        @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at, @deleted_at)`,
+    ).run({
+      id,
+      sku: p.sku,
+      name: p.name,
+      type: p.type,
+      unit: p.unit,
+      selling_price: p.sellingPrice,
+      cost_price: p.costPrice,
+      quantity: p.quantity ?? 0,
+      low_stock_threshold: p.lowStockThreshold ?? 5,
+      fabric_sell_unit: p.fabricSellUnit ?? null,
+      created_at: p.createdAt || t,
+      updated_at: t,
+      deleted_at: p.deletedAt ?? null,
+    })
+  }
+  const sizes = (p.sizes as Array<{ id?: string; size: string; quantity: number }>) || []
+  const ins = db.prepare(
+    'INSERT INTO product_sizes (id, product_id, size, quantity) VALUES (?, ?, ?, ?)',
+  )
+  for (const s of sizes) {
+    ins.run(s.id || `${id}-${s.size}`, id, s.size, s.quantity ?? 0)
+  }
+}
+
+function upsertSupplier(s: Record<string, unknown>) {
+  const id = String(s.id)
+  const t = String(s.updatedAt || nowIso())
+  const existing = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(id)
+  if (existing) {
+    db.prepare(
+      `UPDATE suppliers SET name=?, phone=?, address=?, notes=?, updated_at=?, deleted_at=? WHERE id=?`,
+    ).run(s.name, s.phone ?? '', s.address ?? '', s.notes ?? '', t, s.deletedAt ?? null, id)
+  } else {
+    db.prepare(
+      `INSERT INTO suppliers (id, name, phone, address, notes, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, s.name, s.phone ?? '', s.address ?? '', s.notes ?? '', s.createdAt || t, t, s.deletedAt ?? null)
+  }
+}
+
+function createPurchase(p: Record<string, unknown>) {
+  const id = String(p.id)
+  const exists = db.prepare('SELECT id FROM purchases WHERE id = ?').get(id)
+  if (exists) return { id, duplicate: true }
+  const items = (p.items as Array<Record<string, unknown>>) || []
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO purchases (id, supplier_id, bill_no, date, total, notes, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      p.supplierId ?? null,
+      p.billNo ?? '',
+      p.date,
+      p.total ?? 0,
+      p.notes ?? '',
+      p.createdBy ?? null,
+      p.createdAt || nowIso(),
+    )
+    const ins = db.prepare(
+      `INSERT INTO purchase_items (id, purchase_id, product_id, product_name, size, quantity, unit, unit_cost, line_total)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    for (const it of items) {
+      ins.run(
+        it.id || crypto.randomUUID(),
+        id,
+        it.productId,
+        it.productName ?? '',
+        it.size ?? null,
+        it.quantity,
+        it.unit ?? 'piece',
+        it.unitCost,
+        it.lineTotal,
+      )
+      const prod = db.prepare('SELECT type FROM products WHERE id = ?').get(it.productId as string) as
+        | { type: string }
+        | undefined
+      if (prod) {
+        applyStockDelta(
+          String(it.productId),
+          prod.type,
+          (it.size as string) || null,
+          String(it.unit || (prod.type === 'fabric' ? 'metre' : 'piece')),
+          Number(it.quantity),
+          1,
+        )
+      }
+    }
+  })
+  tx()
+  return { id, duplicate: false }
+}
+
+function createSale(s: Record<string, unknown>) {
+  const id = String(s.id)
+  const exists = db.prepare('SELECT id FROM sales WHERE id = ?').get(id)
+  if (exists) return { id, duplicate: true }
+  const items = (s.items as Array<Record<string, unknown>>) || []
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO sales (id, bill_no, datetime, cashier_id, cashier_name, customer_phone,
+        payment_mode, cash_amount, upi_amount, card_amount, discount, grand_total, status, notes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      s.billNo,
+      s.datetime,
+      s.cashierId ?? null,
+      s.cashierName ?? '',
+      s.customerPhone ?? '',
+      s.paymentMode,
+      s.cashAmount ?? 0,
+      s.upiAmount ?? 0,
+      s.cardAmount ?? 0,
+      s.discount ?? 0,
+      s.grandTotal,
+      s.status || 'completed',
+      s.notes ?? '',
+      s.createdAt || nowIso(),
+    )
+    const ins = db.prepare(
+      `INSERT INTO sale_items (id, sale_id, product_id, product_name, product_type, sku, size, quantity, unit, rate, line_total)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    for (const it of items) {
+      ins.run(
+        it.id || crypto.randomUUID(),
+        id,
+        it.productId,
+        it.productName,
+        it.productType,
+        it.sku ?? '',
+        it.size ?? null,
+        it.quantity,
+        it.unit,
+        it.rate,
+        it.lineTotal,
+      )
+      applyStockDelta(
+        String(it.productId),
+        String(it.productType),
+        (it.size as string) || null,
+        String(it.unit),
+        Number(it.quantity),
+        -1,
+      )
+    }
+  })
+  tx()
+  return { id, duplicate: false }
+}
+
+function createReturn(r: Record<string, unknown>) {
+  const id = String(r.id)
+  const exists = db.prepare('SELECT id FROM returns WHERE id = ?').get(id)
+  if (exists) return { id, duplicate: true }
+  const items = (r.items as Array<Record<string, unknown>>) || []
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO returns (id, sale_id, datetime, reason, refund_amount, refund_mode, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      r.saleId,
+      r.datetime,
+      r.reason ?? '',
+      r.refundAmount,
+      r.refundMode ?? 'cash',
+      r.createdBy ?? null,
+      r.createdAt || nowIso(),
+    )
+    const ins = db.prepare(
+      `INSERT INTO return_items (id, return_id, sale_item_id, product_id, product_name, size, quantity, unit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    for (const it of items) {
+      ins.run(
+        it.id || crypto.randomUUID(),
+        id,
+        it.saleItemId,
+        it.productId,
+        it.productName ?? '',
+        it.size ?? null,
+        it.quantity,
+        it.unit ?? 'piece',
+      )
+      const saleItem = db
+        .prepare('SELECT product_type FROM sale_items WHERE id = ?')
+        .get(it.saleItemId as string) as { product_type: string } | undefined
+      const type =
+        (it.productType as string) ||
+        saleItem?.product_type ||
+        (db.prepare('SELECT type FROM products WHERE id = ?').get(it.productId as string) as { type: string } | undefined)
+          ?.type ||
+        'saree'
+      applyStockDelta(
+        String(it.productId),
+        type,
+        (it.size as string) || null,
+        String(it.unit || 'piece'),
+        Number(it.quantity),
+        1,
+      )
+    }
+    const saleId = String(r.saleId)
+    const orig = db.prepare('SELECT id FROM sale_items WHERE sale_id = ?').all(saleId) as { id: string }[]
+    const returned = db
+      .prepare(
+        `SELECT ri.sale_item_id as id, SUM(ri.quantity) as q
+         FROM return_items ri JOIN returns r2 ON r2.id = ri.return_id
+         WHERE r2.sale_id = ? GROUP BY ri.sale_item_id`,
+      )
+      .all(saleId) as { id: string; q: number }[]
+    const map = Object.fromEntries(returned.map((x) => [x.id, x.q]))
+    const origQtys = db
+      .prepare('SELECT id, quantity FROM sale_items WHERE sale_id = ?')
+      .all(saleId) as { id: string; quantity: number }[]
+    const allReturned = origQtys.every((x) => (map[x.id] || 0) >= x.quantity - 1e-9)
+    db.prepare('UPDATE sales SET status = ? WHERE id = ?').run(allReturned ? 'returned' : 'partial_return', saleId)
+  })
+  tx()
+  return { id, duplicate: false }
+}
+
+app.post('/api/sync', auth, (req: Authed, res) => {
+  const body = req.body || {}
+  const results: Record<string, unknown> = { products: [], suppliers: [], purchases: [], sales: [], returns: [] }
+  try {
+    const tx = db.transaction(() => {
+      for (const p of body.products || []) {
+        upsertProduct(p)
+        ;(results.products as unknown[]).push({ id: p.id, ok: true })
+      }
+      for (const s of body.suppliers || []) {
+        upsertSupplier(s)
+        ;(results.suppliers as unknown[]).push({ id: s.id, ok: true })
+      }
+      for (const p of body.purchases || []) {
+        ;(results.purchases as unknown[]).push(createPurchase(p))
+      }
+      for (const s of body.sales || []) {
+        ;(results.sales as unknown[]).push(createSale(s))
+      }
+      for (const r of body.returns || []) {
+        ;(results.returns as unknown[]).push(createReturn(r))
+      }
+      if (body.store && req.user?.role === 'owner') {
+        const st = body.store
+        db.prepare(
+          'UPDATE store_profile SET name=?, address=?, phone=?, city=?, updated_at=? WHERE id=?',
+        ).run(st.name, st.address ?? '', st.phone ?? '', st.city ?? '', st.updatedAt || nowIso(), st.id || 'store-1')
+        results.store = { ok: true }
+      }
+    })
+    tx()
+    res.json({ ok: true, results, snapshot: getSnapshot() })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Sync failed', detail: String(err) })
+  }
+})
+
+app.get('/api/products', auth, (_req, res) => {
+  const rows = db.prepare('SELECT * FROM products WHERE deleted_at IS NULL ORDER BY name').all() as Record<
+    string,
+    unknown
+  >[]
+  res.json(rows.map(rowProduct))
+})
+
+app.post('/api/products', auth, ownerOnly, (req: Authed, res) => {
+  upsertProduct(req.body)
+  const row = db.prepare('SELECT * FROM products WHERE id = ?').get(req.body.id) as Record<string, unknown>
+  res.json(rowProduct(row))
+})
+
+app.delete('/api/products/:id', auth, ownerOnly, (req, res) => {
+  db.prepare('UPDATE products SET deleted_at = ?, updated_at = ? WHERE id = ?').run(nowIso(), nowIso(), req.params.id)
+  res.json({ ok: true })
+})
+
+app.get('/api/reports/today', auth, (req: Authed, res) => {
+  if (req.user?.role !== 'owner') return res.status(403).json({ error: 'Owner only' })
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  const iso = start.toISOString()
+  const sales = db
+    .prepare(
+      `SELECT payment_mode as paymentMode, cash_amount as cashAmount, upi_amount as upiAmount,
+              card_amount as cardAmount, grand_total as grandTotal, status
+       FROM sales WHERE datetime >= ? AND status != 'returned'`,
+    )
+    .all(iso) as Array<Record<string, number | string>>
+  let count = 0
+  let total = 0
+  let cash = 0
+  let upi = 0
+  let card = 0
+  for (const s of sales) {
+    count++
+    total += Number(s.grandTotal)
+    cash += Number(s.cashAmount)
+    upi += Number(s.upiAmount)
+    card += Number(s.cardAmount)
+  }
+  res.json({ count, total, cash, upi, card, date: iso.slice(0, 10) })
+})
+
+const webDist = path.join(__dirname, '..', '..', 'web', 'dist')
+if (fs.existsSync(webDist)) {
+  app.use(express.static(webDist))
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next()
+    res.sendFile(path.join(webDist, 'index.html'))
+  })
+}
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Laxmi Fashion server http://0.0.0.0:${PORT}`)
+  if (seeded) console.log('Seeded owner/owner123 and cashier/cashier123')
+})

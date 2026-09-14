@@ -1,0 +1,24 @@
+{
+  "name": "laxmi-fashion-store",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Laxmi Fashion Wholesale Mart — local-first store management PWA",
+  "workspaces": [
+    "apps/web",
+    "apps/server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c magenta,cyan \"npm run dev -w @laxmi/server\" \"npm run dev -w @laxmi/web\"",
+    "dev:server": "npm run dev -w @laxmi/server",
+    "dev:web": "npm run dev -w @laxmi/web",
+    "build": "npm run build -w @laxmi/web && npm run build -w @laxmi/server",
+    "start": "npm run start -w @laxmi/server",
+    "start:all": "npm run build && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
