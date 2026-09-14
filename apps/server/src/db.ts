@@ -174,9 +174,16 @@ export function applyStockDelta(
 ) {
   const delta = direction * stockQtyFromLine(unit, quantity)
   if (productType === 'garment' && size) {
-    db.prepare(
-      'UPDATE product_sizes SET quantity = quantity + ? WHERE product_id = ? AND size = ?',
-    ).run(delta, productId, size)
+    const row = db
+      .prepare('SELECT id, quantity FROM product_sizes WHERE product_id = ? AND size = ?')
+      .get(productId, size) as { id: string; quantity: number } | undefined
+    if (row) {
+      db.prepare('UPDATE product_sizes SET quantity = quantity + ? WHERE id = ?').run(delta, row.id)
+    } else if (delta !== 0) {
+      db.prepare(
+        'INSERT INTO product_sizes (id, product_id, size, quantity) VALUES (?, ?, ?, ?)',
+      ).run(`${productId}-${size}`, productId, size, Math.max(0, delta))
+    }
   } else {
     db.prepare(
       'UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ?',

@@ -179,6 +179,7 @@ function createPurchase(p: Record<string, unknown>) {
   const exists = db.prepare('SELECT id FROM purchases WHERE id = ?').get(id)
   if (exists) return { id, duplicate: true }
   const items = (p.items as Array<Record<string, unknown>>) || []
+  const costUpdates = (p.costUpdates as Array<{ productId: string; costPrice: number }>) || []
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO purchases (id, supplier_id, bill_no, date, total, notes, created_by, created_at)
@@ -197,6 +198,7 @@ function createPurchase(p: Record<string, unknown>) {
       `INSERT INTO purchase_items (id, purchase_id, product_id, product_name, size, quantity, unit, unit_cost, line_total)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
+    const latestCost = new Map<string, number>()
     for (const it of items) {
       ins.run(
         it.id || crypto.randomUUID(),
@@ -209,6 +211,9 @@ function createPurchase(p: Record<string, unknown>) {
         it.unitCost,
         it.lineTotal,
       )
+      if (it.productId != null && it.unitCost != null && Number.isFinite(Number(it.unitCost))) {
+        latestCost.set(String(it.productId), Number(it.unitCost))
+      }
       const prod = db.prepare('SELECT type FROM products WHERE id = ?').get(it.productId as string) as
         | { type: string }
         | undefined
@@ -222,6 +227,16 @@ function createPurchase(p: Record<string, unknown>) {
           1,
         )
       }
+    }
+    for (const cu of costUpdates) {
+      if (cu?.productId != null && Number.isFinite(Number(cu.costPrice))) {
+        latestCost.set(String(cu.productId), Number(cu.costPrice))
+      }
+    }
+    const t = nowIso()
+    const updCost = db.prepare('UPDATE products SET cost_price = ?, updated_at = ? WHERE id = ?')
+    for (const [productId, costPrice] of latestCost) {
+      updCost.run(costPrice, t, productId)
     }
   })
   tx()
