@@ -8,6 +8,7 @@ import { db, enqueue, productsWithSizes } from '../db'
 import { inr, qtyLabel, stockQtyOfLine, typeLabel } from '../lib/format'
 import { nextBillNo, uid } from '../lib/ids'
 import { flushOutbox } from '../sync'
+import { normalizeProductPrices } from '../lib/pricing'
 import type { PaymentMode, Product, ProductType, Sale, SaleItem, StoreProfile } from '../types'
 
 type CartLine = {
@@ -50,6 +51,7 @@ export function POS() {
   const [pickUnit, setPickUnit] = useState<'metre' | 'cm'>('metre')
   const [done, setDone] = useState<{ sale: Sale; items: SaleItem[] } | null>(null)
   const [err, setErr] = useState('')
+  const [wholesaleMode, setWholesaleMode] = useState(false)
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase()
@@ -111,7 +113,8 @@ export function POS() {
       setErr(`Not enough stock (available ${avail})`)
       return
     }
-    const rate = pick.sellingPrice
+    const prices = normalizeProductPrices(pick as unknown as Record<string, unknown>)
+    const rate = wholesaleMode ? prices.wholesalePrice : prices.salePrice
     const lineTotal = Math.round((pick.type === 'fabric' ? stockNeed * rate : qty * rate) * 100) / 100
     const key = `${pick.id}-${size || ''}-${unit}`
     setCart((prev) => {
@@ -257,7 +260,13 @@ export function POS() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="font-bold text-brand-700">{inr(p.sellingPrice)}</div>
+                    <div className="font-bold text-brand-700">
+                      {inr(
+                        wholesaleMode
+                          ? normalizeProductPrices(p as unknown as Record<string, unknown>).wholesalePrice
+                          : normalizeProductPrices(p as unknown as Record<string, unknown>).salePrice,
+                      )}
+                    </div>
                     <div className="text-[11px] text-slate-500">
                       {p.type === 'fabric' ? `${stock} m` : `${stock} pcs`}
                     </div>
@@ -270,7 +279,22 @@ export function POS() {
       </section>
 
       <aside className="rounded-2xl border border-brand-100 bg-white p-3 shadow-sm lg:sticky lg:top-3">
-        <h2 className="mb-2 font-bold text-brand-800">Bill</h2>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h2 className="font-bold text-brand-800">Bill</h2>
+          <button
+            type="button"
+            onClick={() => {
+              setWholesaleMode((v) => !v)
+              setCart([])
+            }}
+            className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${
+              wholesaleMode ? 'bg-amber-500 text-white' : 'bg-brand-50 text-brand-800'
+            }`}
+            title="Clears cart when switching"
+          >
+            {wholesaleMode ? 'Wholesale bill' : 'Retail bill'}
+          </button>
+        </div>
         {err && <div className="mb-2 rounded-lg bg-red-50 px-2 py-1 text-sm text-red-700">{err}</div>}
         <div className="max-h-56 space-y-2 overflow-auto">
           {cart.length === 0 && <div className="text-sm text-slate-500">Tap a product to add</div>}
@@ -351,8 +375,14 @@ export function POS() {
               <div>
                 <div className="font-bold">{pick.name}</div>
                 <div className="text-sm text-slate-500">
-                  {typeLabel(pick.type)} · {inr(pick.sellingPrice)}
+                  {typeLabel(pick.type)} ·{' '}
+                  {inr(
+                    wholesaleMode
+                      ? normalizeProductPrices(pick as unknown as Record<string, unknown>).wholesalePrice
+                      : normalizeProductPrices(pick as unknown as Record<string, unknown>).salePrice,
+                  )}
                   {pick.type === 'fabric' ? ' / m' : ''}
+                  {wholesaleMode ? ' (wholesale)' : ' (sale)'}
                 </div>
               </div>
               <button type="button" onClick={() => setPick(null)}>

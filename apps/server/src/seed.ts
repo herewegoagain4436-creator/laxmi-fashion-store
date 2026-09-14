@@ -18,14 +18,20 @@ export function seedIfEmpty() {
   insertUser.run('user-owner', 'owner', hashPassword('owner123'), 'owner', 'Store Owner', t)
   insertUser.run('user-cashier', 'cashier', hashPassword('cashier123'), 'cashier', 'Counter Cashier', t)
 
+  const defaultPricing = JSON.stringify({
+    garment: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+    saree: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+    fabric: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+  })
   db.prepare(
-    'INSERT INTO store_profile (id, name, address, phone, city, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO store_profile (id, name, address, phone, city, pricing_settings, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   ).run(
     'store-1',
     'Laxmi Fashion Wholesale Mart',
     'Shop 14, Textile Market',
     '9876500000',
     'Surat',
+    defaultPricing,
     t,
   )
 
@@ -44,9 +50,17 @@ export function seedIfEmpty() {
 
   const insertProduct = db.prepare(
     `INSERT INTO products
-      (id, sku, name, type, unit, selling_price, cost_price, quantity, low_stock_threshold, fabric_sell_unit, created_at, updated_at)
-     VALUES (@id, @sku, @name, @type, @unit, @selling_price, @cost_price, @quantity, @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at)`,
+      (id, sku, name, type, unit, selling_price, cost_price, wholesale_price, mrp, quantity, low_stock_threshold, fabric_sell_unit, created_at, updated_at)
+     VALUES (@id, @sku, @name, @type, @unit, @selling_price, @cost_price, @wholesale_price, @mrp, @quantity, @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at)`,
   )
+  function four(cost: number, sale: number) {
+    return {
+      selling_price: sale,
+      cost_price: cost,
+      wholesale_price: Math.round(cost * 1.2 * 100) / 100,
+      mrp: Math.round(cost * 2 * 100) / 100,
+    }
+  }
   const insertSize = db.prepare(
     'INSERT INTO product_sizes (id, product_id, size, quantity) VALUES (?, ?, ?, ?)',
   )
@@ -109,8 +123,7 @@ export function seedIfEmpty() {
       name: g.name,
       type: 'garment',
       unit: 'piece',
-      selling_price: g.price,
-      cost_price: g.cost,
+      ...four(g.cost, g.price),
       quantity: 0,
       low_stock_threshold: 4,
       fabric_sell_unit: null,
@@ -140,8 +153,7 @@ export function seedIfEmpty() {
       name: s.name,
       type: 'saree',
       unit: 'piece',
-      selling_price: s.price,
-      cost_price: s.cost,
+      ...four(s.cost, s.price),
       quantity: s.qty,
       low_stock_threshold: 5,
       fabric_sell_unit: null,
@@ -162,8 +174,7 @@ export function seedIfEmpty() {
       name: f.name,
       type: 'fabric',
       unit: 'metre',
-      selling_price: f.price,
-      cost_price: f.cost,
+      ...four(f.cost, f.price),
       quantity: f.qty,
       low_stock_threshold: 15,
       fabric_sell_unit: f.sell,

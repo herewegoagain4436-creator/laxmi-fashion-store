@@ -3,9 +3,10 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { useAuth } from '../auth'
 import { SizeChips } from '../components/SizeChips'
-import { db, enqueue, productsWithSizes } from '../db'
+import { db, enqueue, getPricingSettings, productsWithSizes } from '../db'
 import { inr, isLowStock, productStock, typeLabel } from '../lib/format'
 import { uid } from '../lib/ids'
+import { computePricesFromPurchase, normalizeProductPrices } from '../lib/pricing'
 import { flushOutbox } from '../sync'
 import type { Product, ProductSize, ProductType } from '../types'
 import { STANDARD_SIZES } from '../types'
@@ -14,8 +15,10 @@ const emptyForm = () => ({
   name: '',
   sku: '',
   type: 'garment' as ProductType,
-  sellingPrice: '',
-  costPrice: '',
+  purchasePrice: '',
+  wholesalePrice: '',
+  mrp: '',
+  salePrice: '',
   quantity: '',
   lowStockThreshold: '5',
   fabricSellUnit: 'metre' as 'metre' | 'cm',
@@ -32,6 +35,7 @@ export function Inventory() {
   const [form, setForm] = useState<ReturnType<typeof emptyForm> | null>(null)
   const [editId, setEditId] = useState<string | null>(null)
   const [sizeQtys, setSizeQtys] = useState<Record<string, string>>({})
+  const [derivedTouched, setDerivedTouched] = useState(false)
 
   const filtered = useMemo(() => {
     return products.filter((p) => {
@@ -44,7 +48,9 @@ export function Inventory() {
   }, [products, q, tab])
 
   function openEdit(p?: Product) {
+    setDerivedTouched(false)
     if (p) {
+      const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
       setEditId(p.id)
       const sq: Record<string, string> = {}
       for (const s of p.sizes || []) sq[s.size] = String(s.quantity)
@@ -53,8 +59,10 @@ export function Inventory() {
         name: p.name,
         sku: p.sku,
         type: p.type,
-        sellingPrice: String(p.sellingPrice),
-        costPrice: String(p.costPrice),
+        purchasePrice: String(n.purchasePrice),
+        wholesalePrice: String(n.wholesalePrice),
+        mrp: String(n.mrp),
+        salePrice: String(n.salePrice),
         quantity: String(p.quantity),
         lowStockThreshold: String(p.lowStockThreshold),
         fabricSellUnit: (p.fabricSellUnit as 'metre' | 'cm') || 'metre',
@@ -68,6 +76,48 @@ export function Inventory() {
       setSizeQtys(sq)
       setForm(emptyForm())
     }
+  }
+
+  async function applyRecalc() {
+    if (!form) return
+    const settings = await getPricingSettings()
+    const purchase = Number(form.purchasePrice) || 0
+    const derived = computePricesFromPurchase(purchase, settings, form.type)
+    setForm({
+      ...form,
+      wholesalePrice: String(derived.wholesalePrice),
+      mrp: String(derived.mrp),
+      salePrice: String(derived.salePrice),
+    })
+    setDerivedTouched(false)
+  }
+
+  async function onPurchaseChange(value: string) {
+    if (!form) return
+    const next = { ...form, purchasePrice: value }
+    if (!derivedTouched) {
+      const settings = await getPricingSettings()
+      const purchase = Number(value) || 0
+      const derived = computePricesFromPurchase(purchase, settings, form.type)
+      next.wholesalePrice = String(derived.wholesalePrice)
+      next.mrp = String(derived.mrp)
+      next.salePrice = String(derived.salePrice)
+    }
+    setForm(next)
+  }
+
+  async function onTypeChange(type: ProductType) {
+    if (!form) return
+    const next = { ...form, type }
+    if (!derivedTouched && form.purchasePrice) {
+      const settings = await getPricingSettings()
+      const purchase = Number(form.purchasePrice) || 0
+      const derived = computePricesFromPurchase(purchase, settings, type)
+      next.wholesalePrice = String(derived.wholesalePrice)
+      next.mrp = String(derived.mrp)
+      next.salePrice = String(derived.salePrice)
+    }
+    setForm(next)
   }
 
   async function save() {
@@ -85,14 +135,20 @@ export function Inventory() {
           quantity: Number(qty) || 0,
         }))
     }
+    const purchase = Number(form.purchasePrice) || 0
+    const sale = Number(form.salePrice) || 0
     const product: Product = {
       id,
       sku: form.sku.trim() || `SKU-${id.slice(0, 8)}`,
       name: form.name.trim(),
       type: form.type,
       unit: form.type === 'fabric' ? 'metre' : 'piece',
-      sellingPrice: Number(form.sellingPrice) || 0,
-      costPrice: Number(form.costPrice) || 0,
+      purchasePrice: purchase,
+      costPrice: purchase,
+      wholesalePrice: Number(form.wholesalePrice) || 0,
+      mrp: Number(form.mrp) || 0,
+      salePrice: sale,
+      sellingPrice: sale,
       quantity: form.type === 'garment' ? 0 : Number(form.quantity) || 0,
       lowStockThreshold: Number(form.lowStockThreshold) || 0,
       fabricSellUnit: form.type === 'fabric' ? form.fabricSellUnit : null,
@@ -156,13 +212,16 @@ export function Inventory() {
         ))}
       </div>
       <div className="overflow-auto rounded-xl border bg-white">
-        <table className="w-full min-w-[640px] text-left text-sm">
+        <table className="w-full min-w-[720px] text-left text-sm">
           <thead className="bg-brand-50 text-brand-900">
             <tr>
               <th className="px-3 py-2">Product</th>
               <th className="px-3 py-2">Type</th>
               <th className="px-3 py-2">Stock</th>
-              <th className="px-3 py-2">Rate</th>
+              <th className="px-3 py-2">Purchase</th>
+              <th className="px-3 py-2">Wholesale</th>
+              <th className="px-3 py-2">MRP</th>
+              <th className="px-3 py-2">Sale</th>
               <th className="px-3 py-2"></th>
             </tr>
           </thead>
@@ -170,6 +229,7 @@ export function Inventory() {
             {filtered.map((p) => {
               const stock = productStock(p)
               const low = isLowStock(p)
+              const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
               return (
                 <tr key={p.id} className="border-t">
                   <td className="px-3 py-2">
@@ -192,7 +252,10 @@ export function Inventory() {
                     </span>
                     {low && <span className="ml-2 rounded bg-amber-100 px-1.5 text-[11px]">LOW</span>}
                   </td>
-                  <td className="px-3 py-2">{inr(p.sellingPrice)}</td>
+                  <td className="px-3 py-2">{inr(n.purchasePrice)}</td>
+                  <td className="px-3 py-2">{inr(n.wholesalePrice)}</td>
+                  <td className="px-3 py-2">{inr(n.mrp)}</td>
+                  <td className="px-3 py-2 font-semibold">{inr(n.salePrice)}</td>
                   <td className="px-3 py-2 text-right">
                     {owner && (
                       <div className="flex justify-end gap-2">
@@ -234,7 +297,7 @@ export function Inventory() {
                   <button
                     key={t}
                     type="button"
-                    onClick={() => setForm({ ...form, type: t })}
+                    onClick={() => void onTypeChange(t)}
                     className={`min-h-[44px] rounded-xl border text-sm font-semibold ${
                       form.type === t ? 'border-brand-500 bg-brand-50' : ''
                     }`}
@@ -243,20 +306,75 @@ export function Inventory() {
                   </button>
                 ))}
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  className="min-h-[44px] rounded-xl border px-3"
-                  placeholder="Selling price"
-                  value={form.sellingPrice}
-                  onChange={(e) => setForm({ ...form, sellingPrice: e.target.value })}
-                />
-                <input
-                  className="min-h-[44px] rounded-xl border px-3"
-                  placeholder="Cost price"
-                  value={form.costPrice}
-                  onChange={(e) => setForm({ ...form, costPrice: e.target.value })}
-                />
+
+              <div className="rounded-xl border border-brand-100 bg-cream/40 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-brand-800">Prices</div>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-brand-200 bg-white px-2 py-1 text-[11px] font-semibold text-brand-700"
+                    onClick={() => void applyRecalc()}
+                  >
+                    Recalculate from purchase
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-xs font-medium text-slate-600">
+                    Purchase (cost)
+                    <input
+                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      placeholder="Purchase"
+                      value={form.purchasePrice}
+                      inputMode="decimal"
+                      onChange={(e) => void onPurchaseChange(e.target.value)}
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-slate-600">
+                    Wholesale
+                    <input
+                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      placeholder="Wholesale"
+                      value={form.wholesalePrice}
+                      inputMode="decimal"
+                      onChange={(e) => {
+                        setDerivedTouched(true)
+                        setForm({ ...form, wholesalePrice: e.target.value })
+                      }}
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-slate-600">
+                    MRP
+                    <input
+                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      placeholder="MRP"
+                      value={form.mrp}
+                      inputMode="decimal"
+                      onChange={(e) => {
+                        setDerivedTouched(true)
+                        setForm({ ...form, mrp: e.target.value })
+                      }}
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-slate-600">
+                    Sale (retail)
+                    <input
+                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      placeholder="Sale"
+                      value={form.salePrice}
+                      inputMode="decimal"
+                      onChange={(e) => {
+                        setDerivedTouched(true)
+                        setForm({ ...form, salePrice: e.target.value })
+                      }}
+                    />
+                  </label>
+                </div>
+                <p className="mt-2 text-[11px] text-slate-500">
+                  Changing purchase auto-fills wholesale / MRP / sale from category rules until you edit them.
+                  Use Recalculate to re-apply.
+                </p>
               </div>
+
               {form.type !== 'garment' && (
                 <input
                   className="min-h-[44px] rounded-xl border px-3"

@@ -33,6 +33,7 @@ export function migrate() {
       address TEXT,
       phone TEXT,
       city TEXT,
+      pricing_settings TEXT,
       updated_at TEXT NOT NULL
     );
 
@@ -157,6 +158,47 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_products_type ON products(type);
     CREATE INDEX IF NOT EXISTS idx_sizes_product ON product_sizes(product_id);
   `)
+  ensureFourPriceColumns()
+}
+
+function tableColumns(table: string): Set<string> {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  return new Set(rows.map((r) => r.name))
+}
+
+/** Add wholesale_price / mrp / pricing_settings and backfill from cost. */
+function ensureFourPriceColumns() {
+  const productCols = tableColumns('products')
+  if (!productCols.has('wholesale_price')) {
+    db.exec('ALTER TABLE products ADD COLUMN wholesale_price REAL')
+  }
+  if (!productCols.has('mrp')) {
+    db.exec('ALTER TABLE products ADD COLUMN mrp REAL')
+  }
+  // Backfill only where null
+  db.exec(`
+    UPDATE products
+    SET wholesale_price = ROUND(cost_price * 1.2, 2)
+    WHERE wholesale_price IS NULL
+  `)
+  db.exec(`
+    UPDATE products
+    SET mrp = ROUND(cost_price * 2.0, 2)
+    WHERE mrp IS NULL
+  `)
+
+  const storeCols = tableColumns('store_profile')
+  if (!storeCols.has('pricing_settings')) {
+    db.exec('ALTER TABLE store_profile ADD COLUMN pricing_settings TEXT')
+  }
+  const defaultPricing = JSON.stringify({
+    garment: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+    saree: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+    fabric: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+  })
+  db.prepare(
+    `UPDATE store_profile SET pricing_settings = ? WHERE pricing_settings IS NULL OR pricing_settings = ''`,
+  ).run(defaultPricing)
 }
 
 export function stockQtyFromLine(unit: string, quantity: number) {
@@ -197,14 +239,28 @@ export function rowProduct(r: Record<string, unknown>) {
       'SELECT id, product_id as productId, size, quantity FROM product_sizes WHERE product_id = ? ORDER BY size',
     )
     .all(r.id) as Array<{ id: string; productId: string; size: string; quantity: number }>
+  const cost = Number(r.cost_price) || 0
+  const sale = Number(r.selling_price) || 0
+  const wholesale =
+    r.wholesale_price != null && Number.isFinite(Number(r.wholesale_price))
+      ? Number(r.wholesale_price)
+      : Math.round(cost * 1.2 * 100) / 100
+  const mrp =
+    r.mrp != null && Number.isFinite(Number(r.mrp))
+      ? Number(r.mrp)
+      : Math.round(cost * 2 * 100) / 100
   return {
     id: r.id,
     sku: r.sku,
     name: r.name,
     type: r.type,
     unit: r.unit,
-    sellingPrice: r.selling_price,
-    costPrice: r.cost_price,
+    sellingPrice: sale,
+    salePrice: sale,
+    costPrice: cost,
+    purchasePrice: cost,
+    wholesalePrice: wholesale,
+    mrp,
     quantity: r.quantity,
     lowStockThreshold: r.low_stock_threshold,
     fabricSellUnit: r.fabric_sell_unit,
@@ -282,6 +338,15 @@ export function getSnapshot() {
           phone: store.phone,
           city: store.city,
           updatedAt: store.updated_at,
+          pricingSettings: (() => {
+            try {
+              return store.pricing_settings
+                ? JSON.parse(String(store.pricing_settings))
+                : undefined
+            } catch {
+              return undefined
+            }
+          })(),
         }
       : null,
     users,

@@ -1,5 +1,22 @@
 import { db } from './db'
+import { computePricesFromPurchase, DEFAULT_PRICING_SETTINGS, round2 } from './lib/pricing'
 import type { Product, ProductSize, Supplier } from './types'
+
+function withFourPrices(cost: number, sale: number, type: Product['type']): Pick<
+  Product,
+  'purchasePrice' | 'costPrice' | 'wholesalePrice' | 'mrp' | 'salePrice' | 'sellingPrice'
+> {
+  const derived = computePricesFromPurchase(cost, DEFAULT_PRICING_SETTINGS, type)
+  return {
+    purchasePrice: cost,
+    costPrice: cost,
+    wholesalePrice: derived.wholesalePrice,
+    mrp: derived.mrp,
+    // Keep catalog retail when provided; otherwise use derived sale
+    salePrice: sale > 0 ? sale : derived.salePrice,
+    sellingPrice: sale > 0 ? sale : derived.salePrice,
+  }
+}
 
 export async function seedCatalogIfEmpty() {
   const n = await db.products.count()
@@ -23,8 +40,7 @@ export async function seedCatalogIfEmpty() {
       name,
       type: 'garment',
       unit: 'piece',
-      sellingPrice: price,
-      costPrice: cost,
+      ...withFourPrices(cost, price, 'garment'),
       quantity: 0,
       lowStockThreshold: low,
       fabricSellUnit: null,
@@ -49,22 +65,29 @@ export async function seedCatalogIfEmpty() {
     ['p-than-cotton', 'F-COT-001', 'Cotton Than', 'fabric', 85, 52, 120, 15],
     ['p-than-rayon', 'F-RAY-001', 'Rayon Print Fabric', 'fabric', 95, 60, 80, 15],
     ['p-than-geo', 'F-GEO-001', 'Georgette Fabric', 'fabric', 110, 70, 45.5, 15],
-  ].map(([id, sku, name, type, price, cost, qty, low]) => ({
-    id: id as string,
-    sku: sku as string,
-    name: name as string,
-    type: type as Product['type'],
-    unit: type === 'fabric' ? 'metre' : 'piece',
-    sellingPrice: Number(price),
-    costPrice: Number(cost),
-    quantity: Number(qty),
-    lowStockThreshold: Number(low),
-    fabricSellUnit: type === 'fabric' ? 'metre' : null,
-    createdAt: t,
-    updatedAt: t,
-  }))
+  ].map(([id, sku, name, type, price, cost, qty, low]) => {
+    const tpe = type as Product['type']
+    return {
+      id: id as string,
+      sku: sku as string,
+      name: name as string,
+      type: tpe,
+      unit: tpe === 'fabric' ? ('metre' as const) : ('piece' as const),
+      ...withFourPrices(Number(cost), Number(price), tpe),
+      quantity: Number(qty),
+      lowStockThreshold: Number(low),
+      fabricSellUnit: tpe === 'fabric' ? ('metre' as const) : null,
+      createdAt: t,
+      updatedAt: t,
+    }
+  })
 
   products.push(...pieces)
+
+  // Ensure MRP is at least sale for seeded catalog realism
+  for (const p of products) {
+    if (p.mrp < p.salePrice) p.mrp = round2(p.salePrice * 1.25)
+  }
 
   const supplier: Supplier = {
     id: 'sup-rajasthan',

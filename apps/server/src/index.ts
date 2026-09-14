@@ -88,28 +88,45 @@ app.get('/api/snapshot', auth, (_req, res) => {
 })
 
 app.put('/api/store', auth, ownerOnly, (req: Authed, res) => {
-  const { name, address, phone, city } = req.body || {}
+  const { name, address, phone, city, pricingSettings } = req.body || {}
   db.prepare(
-    'UPDATE store_profile SET name = ?, address = ?, phone = ?, city = ?, updated_at = ? WHERE id = ?',
+    'UPDATE store_profile SET name = ?, address = ?, phone = ?, city = ?, pricing_settings = ?, updated_at = ? WHERE id = ?',
   ).run(
     String(name || 'Laxmi Fashion Wholesale Mart'),
     address ?? '',
     phone ?? '',
     city ?? '',
+    pricingSettings != null ? JSON.stringify(pricingSettings) : null,
     nowIso(),
     'store-1',
   )
   res.json({ ok: true })
 })
 
+function resolveProductPrices(p: Record<string, unknown>) {
+  const cost = Number(p.purchasePrice ?? p.costPrice ?? 0) || 0
+  const sale = Number(p.salePrice ?? p.sellingPrice ?? 0) || 0
+  const wholesale =
+    p.wholesalePrice != null && Number.isFinite(Number(p.wholesalePrice))
+      ? Number(p.wholesalePrice)
+      : Math.round(cost * 1.2 * 100) / 100
+  const mrp =
+    p.mrp != null && Number.isFinite(Number(p.mrp))
+      ? Number(p.mrp)
+      : Math.round(cost * 2 * 100) / 100
+  return { cost, sale, wholesale, mrp }
+}
+
 function upsertProduct(p: Record<string, unknown>) {
   const id = String(p.id)
   const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(id)
   const t = String(p.updatedAt || nowIso())
+  const { cost, sale, wholesale, mrp } = resolveProductPrices(p)
   if (existing) {
     db.prepare(
       `UPDATE products SET sku=@sku, name=@name, type=@type, unit=@unit,
-        selling_price=@selling_price, cost_price=@cost_price, quantity=@quantity,
+        selling_price=@selling_price, cost_price=@cost_price,
+        wholesale_price=@wholesale_price, mrp=@mrp, quantity=@quantity,
         low_stock_threshold=@low_stock_threshold, fabric_sell_unit=@fabric_sell_unit,
         updated_at=@updated_at, deleted_at=@deleted_at WHERE id=@id`,
     ).run({
@@ -118,8 +135,10 @@ function upsertProduct(p: Record<string, unknown>) {
       name: p.name,
       type: p.type,
       unit: p.unit,
-      selling_price: p.sellingPrice,
-      cost_price: p.costPrice,
+      selling_price: sale,
+      cost_price: cost,
+      wholesale_price: wholesale,
+      mrp,
       quantity: p.quantity ?? 0,
       low_stock_threshold: p.lowStockThreshold ?? 5,
       fabric_sell_unit: p.fabricSellUnit ?? null,
@@ -129,9 +148,11 @@ function upsertProduct(p: Record<string, unknown>) {
     db.prepare('DELETE FROM product_sizes WHERE product_id = ?').run(id)
   } else {
     db.prepare(
-      `INSERT INTO products (id, sku, name, type, unit, selling_price, cost_price, quantity,
+      `INSERT INTO products (id, sku, name, type, unit, selling_price, cost_price,
+        wholesale_price, mrp, quantity,
         low_stock_threshold, fabric_sell_unit, created_at, updated_at, deleted_at)
-       VALUES (@id, @sku, @name, @type, @unit, @selling_price, @cost_price, @quantity,
+       VALUES (@id, @sku, @name, @type, @unit, @selling_price, @cost_price,
+        @wholesale_price, @mrp, @quantity,
         @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at, @deleted_at)`,
     ).run({
       id,
@@ -139,8 +160,10 @@ function upsertProduct(p: Record<string, unknown>) {
       name: p.name,
       type: p.type,
       unit: p.unit,
-      selling_price: p.sellingPrice,
-      cost_price: p.costPrice,
+      selling_price: sale,
+      cost_price: cost,
+      wholesale_price: wholesale,
+      mrp,
       quantity: p.quantity ?? 0,
       low_stock_threshold: p.lowStockThreshold ?? 5,
       fabric_sell_unit: p.fabricSellUnit ?? null,
@@ -228,15 +251,48 @@ function createPurchase(p: Record<string, unknown>) {
         )
       }
     }
-    for (const cu of costUpdates) {
-      if (cu?.productId != null && Number.isFinite(Number(cu.costPrice))) {
-        latestCost.set(String(cu.productId), Number(cu.costPrice))
+    type PricePack = {
+      purchasePrice: number
+      wholesalePrice?: number
+      mrp?: number
+      salePrice?: number
+    }
+    const latestPrices = new Map<string, PricePack>()
+    for (const [productId, costPrice] of latestCost) {
+      latestPrices.set(productId, { purchasePrice: costPrice })
+    }
+    for (const cu of costUpdates as Array<Record<string, unknown>>) {
+      if (cu?.productId == null) continue
+      const purchase = Number(cu.purchasePrice ?? cu.costPrice)
+      if (!Number.isFinite(purchase)) continue
+      const pack: PricePack = { purchasePrice: purchase }
+      if (cu.wholesalePrice != null && Number.isFinite(Number(cu.wholesalePrice))) {
+        pack.wholesalePrice = Number(cu.wholesalePrice)
       }
+      if (cu.mrp != null && Number.isFinite(Number(cu.mrp))) {
+        pack.mrp = Number(cu.mrp)
+      }
+      if (cu.salePrice != null || cu.sellingPrice != null) {
+        const s = Number(cu.salePrice ?? cu.sellingPrice)
+        if (Number.isFinite(s)) pack.salePrice = s
+      }
+      latestPrices.set(String(cu.productId), pack)
     }
     const t = nowIso()
-    const updCost = db.prepare('UPDATE products SET cost_price = ?, updated_at = ? WHERE id = ?')
-    for (const [productId, costPrice] of latestCost) {
-      updCost.run(costPrice, t, productId)
+    const updCost = db.prepare(
+      `UPDATE products SET cost_price = ?, wholesale_price = COALESCE(?, wholesale_price),
+        mrp = COALESCE(?, mrp), selling_price = COALESCE(?, selling_price), updated_at = ?
+       WHERE id = ?`,
+    )
+    for (const [productId, pack] of latestPrices) {
+      const wholesale =
+        pack.wholesalePrice != null
+          ? pack.wholesalePrice
+          : Math.round(pack.purchasePrice * 1.2 * 100) / 100
+      const mrp =
+        pack.mrp != null ? pack.mrp : Math.round(pack.purchasePrice * 2 * 100) / 100
+      const sale = pack.salePrice != null ? pack.salePrice : null
+      updCost.run(pack.purchasePrice, wholesale, mrp, sale, t, productId)
     }
   })
   tx()
@@ -399,8 +455,16 @@ app.post('/api/sync', auth, (req: Authed, res) => {
       if (body.store && req.user?.role === 'owner') {
         const st = body.store
         db.prepare(
-          'UPDATE store_profile SET name=?, address=?, phone=?, city=?, updated_at=? WHERE id=?',
-        ).run(st.name, st.address ?? '', st.phone ?? '', st.city ?? '', st.updatedAt || nowIso(), st.id || 'store-1')
+          'UPDATE store_profile SET name=?, address=?, phone=?, city=?, pricing_settings=?, updated_at=? WHERE id=?',
+        ).run(
+          st.name,
+          st.address ?? '',
+          st.phone ?? '',
+          st.city ?? '',
+          st.pricingSettings != null ? JSON.stringify(st.pricingSettings) : null,
+          st.updatedAt || nowIso(),
+          st.id || 'store-1',
+        )
         results.store = { ok: true }
       }
     })

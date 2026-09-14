@@ -1,4 +1,5 @@
 import Dexie, { type Table } from 'dexie'
+import { DEFAULT_PRICING_SETTINGS, normalizeProductPrices, normalizePricingSettings } from './lib/pricing'
 import type {
   OutboxItem,
   Product,
@@ -11,7 +12,6 @@ import type {
   SaleItem,
   Snapshot,
   StoreProfile,
-  Supplier,
   User,
 } from './types'
 
@@ -19,12 +19,28 @@ export type LocalUser = User & { passwordHash?: string }
 
 export type Meta = { key: string; value: string }
 
+const STORE_SCHEMA = {
+  users: 'id, username, role',
+  store: 'id',
+  products: 'id, sku, type, name, updatedAt, deletedAt',
+  productSizes: 'id, productId, [productId+size]',
+  suppliers: 'id, name',
+  purchases: 'id, date, supplierId, createdAt',
+  purchaseItems: 'id, purchaseId, productId',
+  sales: 'id, billNo, datetime, status',
+  saleItems: 'id, saleId, productId',
+  returns: 'id, saleId, datetime',
+  returnItems: 'id, returnId, saleItemId',
+  outbox: '++localId, id, type, createdAt, synced',
+  meta: 'key',
+} as const
+
 export class LaxmiDB extends Dexie {
   users!: Table<LocalUser, string>
   store!: Table<StoreProfile, string>
   products!: Table<Product, string>
   productSizes!: Table<ProductSize, string>
-  suppliers!: Table<Supplier, string>
+  suppliers!: Table<SupplierLike, string>
   purchases!: Table<Purchase, string>
   purchaseItems!: Table<PurchaseItem, string>
   sales!: Table<Sale, string>
@@ -36,23 +52,29 @@ export class LaxmiDB extends Dexie {
 
   constructor() {
     super('laxmi-fashion-v1')
-    this.version(1).stores({
-      users: 'id, username, role',
-      store: 'id',
-      products: 'id, sku, type, name, updatedAt, deletedAt',
-      productSizes: 'id, productId, [productId+size]',
-      suppliers: 'id, name',
-      purchases: 'id, date, supplierId, createdAt',
-      purchaseItems: 'id, purchaseId, productId',
-      sales: 'id, billNo, datetime, status',
-      saleItems: 'id, saleId, productId',
-      returns: 'id, saleId, datetime',
-      returnItems: 'id, returnId, saleItemId',
-      outbox: '++localId, id, type, createdAt, synced',
-      meta: 'key',
-    })
+    this.version(1).stores({ ...STORE_SCHEMA })
+    this.version(2)
+      .stores({ ...STORE_SCHEMA })
+      .upgrade(async (tx) => {
+        await tx
+          .table('products')
+          .toCollection()
+          .modify((p: Record<string, unknown>) => {
+            const n = normalizeProductPrices(p)
+            Object.assign(p, n)
+          })
+        await tx
+          .table('store')
+          .toCollection()
+          .modify((s: Record<string, unknown>) => {
+            if (!s.pricingSettings) s.pricingSettings = DEFAULT_PRICING_SETTINGS
+            else s.pricingSettings = normalizePricingSettings(s.pricingSettings as never)
+          })
+      })
   }
 }
+
+type SupplierLike = import('./types').Supplier
 
 export const db = new LaxmiDB()
 
@@ -65,7 +87,15 @@ export async function productsWithSizes() {
     arr.push(s)
     byP.set(s.productId, arr)
   }
-  return products.map((p) => ({ ...p, sizes: byP.get(p.id) || [] }))
+  return products.map((p) => {
+    const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
+    return { ...n, sizes: byP.get(p.id) || [] } as Product
+  })
+}
+
+export async function getPricingSettings() {
+  const store = await db.store.get('store-1')
+  return normalizePricingSettings(store?.pricingSettings)
 }
 
 export async function applySnapshot(snap: Snapshot) {
@@ -86,7 +116,12 @@ export async function applySnapshot(snap: Snapshot) {
       db.meta,
     ],
     async () => {
-      if (snap.store) await db.store.put(snap.store)
+      if (snap.store) {
+        await db.store.put({
+          ...snap.store,
+          pricingSettings: normalizePricingSettings(snap.store.pricingSettings),
+        })
+      }
       for (const u of snap.users) {
         const existing = await db.users.get(u.id)
         await db.users.put({ ...existing, ...u })
@@ -94,7 +129,9 @@ export async function applySnapshot(snap: Snapshot) {
       await db.products.clear()
       await db.productSizes.clear()
       for (const p of snap.products) {
-        const { sizes, ...rest } = p
+        const { sizes, ...rest } = normalizeProductPrices(p as unknown as Record<string, unknown>) as Product & {
+          sizes?: ProductSize[]
+        }
         await db.products.put(rest)
         if (sizes?.length) await db.productSizes.bulkPut(sizes)
       }
@@ -147,6 +184,7 @@ export async function seedLocalIfEmpty() {
     phone: '9876500000',
     city: 'Surat',
     updatedAt: t,
+    pricingSettings: DEFAULT_PRICING_SETTINGS,
   })
 }
 

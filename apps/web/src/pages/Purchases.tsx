@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Search, Trash2, X } from 'lucide-react'
-import { db, enqueue, productsWithSizes } from '../db'
+import { db, enqueue, getPricingSettings, productsWithSizes } from '../db'
 import { useAuth } from '../auth'
 import { inr, qtyLabel, typeLabel } from '../lib/format'
 import { uid } from '../lib/ids'
+import { computePricesFromPurchase, normalizeProductPrices, round2 as r2 } from '../lib/pricing'
 import { flushOutbox } from '../sync'
 import { STANDARD_SIZES, type Product } from '../types'
 
@@ -17,11 +18,14 @@ type Line = {
   quantity: number
   unit: string
   unitCost: number
+  wholesalePrice: number
+  mrp: number
+  salePrice: number
   lineTotal: number
 }
 
 function round2(n: number) {
-  return Math.round(n * 100) / 100
+  return r2(n)
 }
 
 export function Purchases() {
@@ -41,6 +45,10 @@ export function Purchases() {
   const [size, setSize] = useState('')
   const [qty, setQty] = useState('1')
   const [cost, setCost] = useState('')
+  const [wholesale, setWholesale] = useState('')
+  const [mrp, setMrp] = useState('')
+  const [sale, setSale] = useState('')
+  const [derivedTouched, setDerivedTouched] = useState(false)
   const [fabricUnit, setFabricUnit] = useState<'metre' | 'cm'>('metre')
   const [sizeQtys, setSizeQtys] = useState<Record<string, string>>({})
   const [customSize, setCustomSize] = useState('')
@@ -101,6 +109,10 @@ export function Purchases() {
     setSize('')
     setQty('1')
     setCost('')
+    setWholesale('')
+    setMrp('')
+    setSale('')
+    setDerivedTouched(false)
     setFabricUnit('metre')
     setSizeQtys({})
     setCustomSize('')
@@ -113,9 +125,14 @@ export function Purchases() {
     setOpen(true)
   }
 
-  function selectProduct(p: Product) {
+  async function selectProduct(p: Product) {
+    const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
     setPick(p)
-    setCost(String(p.costPrice))
+    setCost(String(n.purchasePrice))
+    setWholesale(String(n.wholesalePrice))
+    setMrp(String(n.mrp))
+    setSale(String(n.salePrice))
+    setDerivedTouched(false)
     setSize('')
     setQty('1')
     setFabricUnit((p.fabricSellUnit as 'metre' | 'cm') || 'metre')
@@ -129,12 +146,35 @@ export function Purchases() {
     setErrors((e) => ({ ...e, add: undefined }))
   }
 
+  async function applyCostAndMaybeDerive(nextCost: string) {
+    setCost(nextCost)
+    if (derivedTouched || !pick) return
+    const settings = await getPricingSettings()
+    const purchase = Number(nextCost) || 0
+    const derived = computePricesFromPurchase(purchase, settings, pick.type)
+    setWholesale(String(derived.wholesalePrice))
+    setMrp(String(derived.mrp))
+    setSale(String(derived.salePrice))
+  }
+
+  async function recalculateFromPurchase() {
+    if (!pick) return
+    const settings = await getPricingSettings()
+    const purchase = Number(cost) || 0
+    const derived = computePricesFromPurchase(purchase, settings, pick.type)
+    setWholesale(String(derived.wholesalePrice))
+    setMrp(String(derived.mrp))
+    setSale(String(derived.salePrice))
+    setDerivedTouched(false)
+  }
+
   function clearPickKeepSearch() {
     setPick(null)
     setSize('')
     setQty('1')
     setSizeQtys({})
     setCustomSize('')
+    setDerivedTouched(false)
     setErrors((e) => ({ ...e, add: undefined }))
   }
 
@@ -145,6 +185,14 @@ export function Purchases() {
       setErrors((e) => ({ ...e, add: 'Enter a valid unit cost' }))
       return
     }
+    const wholesalePrice = Number(wholesale)
+    const mrpPrice = Number(mrp)
+    const salePrice = Number(sale)
+    if (![wholesalePrice, mrpPrice, salePrice].every((x) => Number.isFinite(x) && x >= 0)) {
+      setErrors((e) => ({ ...e, add: 'Enter valid wholesale, MRP, and sale prices' }))
+      return
+    }
+    const priceFields = { wholesalePrice, mrp: mrpPrice, salePrice }
 
     if (pick.type === 'garment') {
       const filled = Object.entries(sizeQtys)
@@ -165,6 +213,7 @@ export function Purchases() {
                 ...prev,
                 quantity,
                 unitCost,
+                ...priceFields,
                 lineTotal: round2(quantity * unitCost),
               }
             } else {
@@ -177,6 +226,7 @@ export function Purchases() {
                 quantity: row.quantity,
                 unit: 'piece',
                 unitCost,
+                ...priceFields,
                 lineTotal: round2(row.quantity * unitCost),
               })
             }
@@ -210,6 +260,7 @@ export function Purchases() {
             ...next[i],
             quantity: quantity2,
             unitCost,
+            ...priceFields,
             lineTotal: round2(quantity2 * unitCost),
           }
           return next
@@ -225,6 +276,7 @@ export function Purchases() {
             quantity,
             unit: 'piece',
             unitCost,
+            ...priceFields,
             lineTotal: round2(quantity * unitCost),
           },
         ]
@@ -263,6 +315,7 @@ export function Purchases() {
         quantity: storeQty,
         unit,
         unitCost,
+        ...priceFields,
         lineTotal: round2(storeQty * unitCost),
       },
     ])
@@ -274,7 +327,10 @@ export function Purchases() {
     setLines((ls) => ls.filter((l) => l.key !== key))
   }
 
-  function updateLine(key: string, patch: Partial<Pick<Line, 'quantity' | 'unitCost'>>) {
+  function updateLine(
+    key: string,
+    patch: Partial<Pick<Line, 'quantity' | 'unitCost' | 'wholesalePrice' | 'mrp' | 'salePrice'>>,
+  ) {
     setLines((ls) =>
       ls.map((l) => {
         if (l.key !== key) return l
@@ -286,10 +342,21 @@ export function Purchases() {
           ...l,
           quantity,
           unitCost,
+          wholesalePrice: patch.wholesalePrice != null ? patch.wholesalePrice : l.wholesalePrice,
+          mrp: patch.mrp != null ? patch.mrp : l.mrp,
+          salePrice: patch.salePrice != null ? patch.salePrice : l.salePrice,
           lineTotal: round2(quantity * unitCost),
         }
       }),
     )
+  }
+
+  async function recalcLineFromPurchase(key: string) {
+    const line = lines.find((l) => l.key === key)
+    if (!line) return
+    const settings = await getPricingSettings()
+    const derived = computePricesFromPurchase(line.unitCost, settings, line.type as Product['type'])
+    updateLine(key, derived)
   }
 
   function addCustomSize() {
@@ -336,9 +403,19 @@ export function Purchases() {
         unitCost: l.unitCost,
         lineTotal: l.lineTotal,
       }))
-      // Latest unit cost per product (last line wins)
-      const latestCost = new Map<string, number>()
-      for (const l of lines) latestCost.set(l.productId, l.unitCost)
+      // Latest prices per product (last line wins)
+      const latestPrices = new Map<
+        string,
+        { purchasePrice: number; wholesalePrice: number; mrp: number; salePrice: number }
+      >()
+      for (const l of lines) {
+        latestPrices.set(l.productId, {
+          purchasePrice: l.unitCost,
+          wholesalePrice: l.wholesalePrice,
+          mrp: l.mrp,
+          salePrice: l.salePrice,
+        })
+      }
 
       await db.transaction('rw', db.purchases, db.purchaseItems, db.products, db.productSizes, db.outbox, async () => {
         await db.purchases.add({
@@ -368,8 +445,16 @@ export function Purchases() {
             if (p) await db.products.update(it.productId, { quantity: Number(p.quantity) + it.quantity, updatedAt: t })
           }
         }
-        for (const [productId, unitCost] of latestCost) {
-          await db.products.update(productId, { costPrice: unitCost, updatedAt: t })
+        for (const [productId, prices] of latestPrices) {
+          await db.products.update(productId, {
+            purchasePrice: prices.purchasePrice,
+            costPrice: prices.purchasePrice,
+            wholesalePrice: prices.wholesalePrice,
+            mrp: prices.mrp,
+            salePrice: prices.salePrice,
+            sellingPrice: prices.salePrice,
+            updatedAt: t,
+          })
         }
         await enqueue(
           'purchase',
@@ -383,7 +468,15 @@ export function Purchases() {
             createdBy: user?.id,
             createdAt: t,
             items: recItems,
-            costUpdates: [...latestCost.entries()].map(([productId, costPrice]) => ({ productId, costPrice })),
+            costUpdates: [...latestPrices.entries()].map(([productId, prices]) => ({
+              productId,
+              costPrice: prices.purchasePrice,
+              purchasePrice: prices.purchasePrice,
+              wholesalePrice: prices.wholesalePrice,
+              mrp: prices.mrp,
+              salePrice: prices.salePrice,
+              sellingPrice: prices.salePrice,
+            })),
           },
           id,
         )
@@ -527,11 +620,11 @@ export function Purchases() {
                         key={p.id}
                         type="button"
                         className="block w-full border-b px-3 py-2.5 text-left text-sm last:border-b-0 hover:bg-brand-50"
-                        onClick={() => selectProduct(p)}
+                        onClick={() => void selectProduct(p)}
                       >
                         <span className="font-medium">{p.name}</span>
                         <span className="ml-2 text-xs text-slate-500">
-                          {p.sku} · {typeLabel(p.type)} · cost {inr(p.costPrice)}
+                          {p.sku} · {typeLabel(p.type)} · purchase {inr(normalizeProductPrices(p as unknown as Record<string, unknown>).purchasePrice)}
                         </span>
                       </button>
                     ))}
@@ -547,7 +640,7 @@ export function Purchases() {
                       <div>
                         <div className="font-semibold text-brand-900">{pick.name}</div>
                         <div className="text-xs text-slate-500">
-                          {pick.sku} · {typeLabel(pick.type)} · default cost {inr(pick.costPrice)}
+                          {pick.sku} · {typeLabel(pick.type)} · purchase {inr(normalizeProductPrices(pick as unknown as Record<string, unknown>).purchasePrice)}
                         </div>
                       </div>
                       <button
@@ -637,16 +730,73 @@ export function Purchases() {
                           />
                         </div>
 
-                        <div>
-                          <label className="mb-1 block text-xs font-semibold text-slate-500">Unit cost (₹)</label>
-                          <input
-                            className="min-h-[40px] w-full rounded-lg border px-2"
-                            value={cost}
-                            onChange={(e) => setCost(e.target.value)}
-                            placeholder="Unit cost"
-                            inputMode="decimal"
-                          />
+
+                        <div className="rounded-lg border border-brand-100 bg-cream/50 p-2">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Prices (override OK)
+                            </span>
+                            <button
+                              type="button"
+                              className="rounded-lg border border-brand-200 bg-white px-2 py-1 text-[11px] font-semibold text-brand-700"
+                              onClick={() => void recalculateFromPurchase()}
+                            >
+                              Recalculate from purchase
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Purchase
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={cost}
+                                onChange={(e) => void applyCostAndMaybeDerive(e.target.value)}
+                                placeholder="Purchase"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Wholesale
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={wholesale}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setWholesale(e.target.value)
+                                }}
+                                placeholder="Wholesale"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              MRP
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={mrp}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setMrp(e.target.value)
+                                }}
+                                placeholder="MRP"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Sale
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={sale}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setSale(e.target.value)
+                                }}
+                                placeholder="Sale"
+                                inputMode="decimal"
+                              />
+                            </label>
+                          </div>
                         </div>
+
 
                         {multiSizePreview.count > 0 ? (
                           <div className="text-sm text-slate-600">
@@ -678,32 +828,85 @@ export function Purchases() {
                             </button>
                           ))}
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="mb-1 block text-xs font-semibold text-slate-500">
-                              Length ({fabricUnit === 'metre' ? 'm' : 'cm'})
-                            </label>
-                            <input
-                              className="min-h-[40px] w-full rounded-lg border px-2"
-                              value={qty}
-                              onChange={(e) => setQty(e.target.value)}
-                              placeholder={fabricUnit === 'metre' ? 'e.g. 1.4' : 'e.g. 80'}
-                              inputMode="decimal"
-                            />
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold text-slate-500">
+                            Length ({fabricUnit === 'metre' ? 'm' : 'cm'})
+                          </label>
+                          <input
+                            className="min-h-[40px] w-full rounded-lg border px-2"
+                            value={qty}
+                            onChange={(e) => setQty(e.target.value)}
+                            placeholder={fabricUnit === 'metre' ? 'e.g. 1.4' : 'e.g. 80'}
+                            inputMode="decimal"
+                          />
+                        </div>
+
+                        <div className="rounded-lg border border-brand-100 bg-cream/50 p-2">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Prices (override OK)
+                            </span>
+                            <button
+                              type="button"
+                              className="rounded-lg border border-brand-200 bg-white px-2 py-1 text-[11px] font-semibold text-brand-700"
+                              onClick={() => void recalculateFromPurchase()}
+                            >
+                              Recalculate from purchase
+                            </button>
                           </div>
-                          <div>
-                            <label className="mb-1 block text-xs font-semibold text-slate-500">
-                              Unit cost (₹ / metre)
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Purchase / m
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={cost}
+                                onChange={(e) => void applyCostAndMaybeDerive(e.target.value)}
+                                placeholder="Purchase / m"
+                                inputMode="decimal"
+                              />
                             </label>
-                            <input
-                              className="min-h-[40px] w-full rounded-lg border px-2"
-                              value={cost}
-                              onChange={(e) => setCost(e.target.value)}
-                              placeholder="Cost per metre"
-                              inputMode="decimal"
-                            />
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Wholesale
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={wholesale}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setWholesale(e.target.value)
+                                }}
+                                placeholder="Wholesale"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              MRP
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={mrp}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setMrp(e.target.value)
+                                }}
+                                placeholder="MRP"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Sale
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={sale}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setSale(e.target.value)
+                                }}
+                                placeholder="Sale"
+                                inputMode="decimal"
+                              />
+                            </label>
                           </div>
                         </div>
+
                         {previewQty > 0 && (
                           <div className="text-sm text-slate-600">
                             Stores as {qtyLabel(previewMetres, 'metre')} · line{' '}
@@ -715,28 +918,83 @@ export function Purchases() {
 
                     {pick.type === 'saree' && (
                       <div className="space-y-2">
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="mb-1 block text-xs font-semibold text-slate-500">Pieces</label>
-                            <input
-                              className="min-h-[40px] w-full rounded-lg border px-2"
-                              value={qty}
-                              onChange={(e) => setQty(e.target.value)}
-                              placeholder="Qty"
-                              inputMode="numeric"
-                            />
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold text-slate-500">Pieces</label>
+                          <input
+                            className="min-h-[40px] w-full rounded-lg border px-2"
+                            value={qty}
+                            onChange={(e) => setQty(e.target.value)}
+                            placeholder="Qty"
+                            inputMode="numeric"
+                          />
+                        </div>
+
+                        <div className="rounded-lg border border-brand-100 bg-cream/50 p-2">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Prices (override OK)
+                            </span>
+                            <button
+                              type="button"
+                              className="rounded-lg border border-brand-200 bg-white px-2 py-1 text-[11px] font-semibold text-brand-700"
+                              onClick={() => void recalculateFromPurchase()}
+                            >
+                              Recalculate from purchase
+                            </button>
                           </div>
-                          <div>
-                            <label className="mb-1 block text-xs font-semibold text-slate-500">Unit cost (₹)</label>
-                            <input
-                              className="min-h-[40px] w-full rounded-lg border px-2"
-                              value={cost}
-                              onChange={(e) => setCost(e.target.value)}
-                              placeholder="Unit cost"
-                              inputMode="decimal"
-                            />
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Purchase
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={cost}
+                                onChange={(e) => void applyCostAndMaybeDerive(e.target.value)}
+                                placeholder="Purchase"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Wholesale
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={wholesale}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setWholesale(e.target.value)
+                                }}
+                                placeholder="Wholesale"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              MRP
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={mrp}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setMrp(e.target.value)
+                                }}
+                                placeholder="MRP"
+                                inputMode="decimal"
+                              />
+                            </label>
+                            <label className="text-[10px] font-semibold uppercase text-slate-500">
+                              Sale
+                              <input
+                                className="mt-1 min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                                value={sale}
+                                onChange={(e) => {
+                                  setDerivedTouched(true)
+                                  setSale(e.target.value)
+                                }}
+                                placeholder="Sale"
+                                inputMode="decimal"
+                              />
+                            </label>
                           </div>
                         </div>
+
                         {previewQty > 0 && (
                           <div className="text-sm text-slate-600">
                             Preview: {previewQty} pcs →{' '}
@@ -800,7 +1058,7 @@ export function Purchases() {
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </div>
-                        <div className="mt-2 grid grid-cols-3 gap-2">
+                        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
                           <div>
                             <label className="mb-0.5 block text-[10px] font-semibold uppercase text-slate-500">
                               Qty ({l.unit === 'metre' ? 'm' : 'pcs'})
@@ -818,7 +1076,7 @@ export function Purchases() {
                           </div>
                           <div>
                             <label className="mb-0.5 block text-[10px] font-semibold uppercase text-slate-500">
-                              Unit cost
+                              Purchase
                             </label>
                             <input
                               className="min-h-[40px] w-full rounded-lg border px-2 text-sm"
@@ -833,6 +1091,51 @@ export function Purchases() {
                           </div>
                           <div>
                             <label className="mb-0.5 block text-[10px] font-semibold uppercase text-slate-500">
+                              Wholesale
+                            </label>
+                            <input
+                              className="min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                              value={String(l.wholesalePrice)}
+                              inputMode="decimal"
+                              onChange={(e) => {
+                                const n = Number(e.target.value)
+                                if (e.target.value === '' || !Number.isFinite(n)) return
+                                updateLine(l.key, { wholesalePrice: n })
+                              }}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-0.5 block text-[10px] font-semibold uppercase text-slate-500">
+                              MRP
+                            </label>
+                            <input
+                              className="min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                              value={String(l.mrp)}
+                              inputMode="decimal"
+                              onChange={(e) => {
+                                const n = Number(e.target.value)
+                                if (e.target.value === '' || !Number.isFinite(n)) return
+                                updateLine(l.key, { mrp: n })
+                              }}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-0.5 block text-[10px] font-semibold uppercase text-slate-500">
+                              Sale
+                            </label>
+                            <input
+                              className="min-h-[40px] w-full rounded-lg border px-2 text-sm"
+                              value={String(l.salePrice)}
+                              inputMode="decimal"
+                              onChange={(e) => {
+                                const n = Number(e.target.value)
+                                if (e.target.value === '' || !Number.isFinite(n)) return
+                                updateLine(l.key, { salePrice: n })
+                              }}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-0.5 block text-[10px] font-semibold uppercase text-slate-500">
                               Line total
                             </label>
                             <div className="flex min-h-[40px] items-center rounded-lg bg-brand-50 px-2 text-sm font-bold text-brand-800">
@@ -840,6 +1143,13 @@ export function Purchases() {
                             </div>
                           </div>
                         </div>
+                        <button
+                          type="button"
+                          className="mt-2 text-[11px] font-semibold text-brand-700 underline"
+                          onClick={() => void recalcLineFromPurchase(l.key)}
+                        >
+                          Recalculate prices from purchase
+                        </button>
                       </li>
                     ))}
                   </ul>

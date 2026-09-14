@@ -10,6 +10,20 @@ export type User = {
   name: string
 }
 
+/** Markup / discount % used to derive wholesale, MRP, sale from purchase cost. */
+export type CategoryPricingRules = {
+  wholesaleMarkupPct: number
+  mrpMarkupPct: number
+  saleDiscountFromMrpPct: number
+}
+
+/** Per product-type pricing rules (garment / saree / fabric). */
+export type PricingSettings = {
+  garment: CategoryPricingRules
+  saree: CategoryPricingRules
+  fabric: CategoryPricingRules
+}
+
 export type StoreProfile = {
   id: string
   name: string
@@ -17,6 +31,7 @@ export type StoreProfile = {
   phone: string
   city: string
   updatedAt: string
+  pricingSettings?: PricingSettings
 }
 
 export type ProductSize = {
@@ -26,14 +41,29 @@ export type ProductSize = {
   quantity: number
 }
 
+/**
+ * Four distinct prices per product:
+ * - purchasePrice / costPrice — what we paid the supplier
+ * - wholesalePrice — when selling wholesale
+ * - mrp — MRP
+ * - salePrice / sellingPrice — retail to consumers (Sale ≠ wholesale)
+ */
 export type Product = {
   id: string
   sku: string
   name: string
   type: ProductType
   unit: 'piece' | 'metre'
+  /** @deprecated prefer salePrice — kept in sync for compatibility */
   sellingPrice: number
+  /** Retail selling price to consumers */
+  salePrice: number
+  /** @deprecated prefer purchasePrice — kept in sync for compatibility */
   costPrice: number
+  /** What we paid the supplier */
+  purchasePrice: number
+  wholesalePrice: number
+  mrp: number
   quantity: number
   lowStockThreshold: number
   fabricSellUnit: 'metre' | 'cm' | null
