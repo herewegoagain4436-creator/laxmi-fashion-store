@@ -16,6 +16,18 @@ export function nowIso() {
   return new Date().toISOString()
 }
 
+const DEFAULT_CATEGORY_RULES = {
+  wholesaleMarkupPct: 20,
+  mrpMarkupPct: 100,
+  saleDiscountFromMrpPct: 20,
+}
+
+export const DEFAULT_CATEGORY_IDS = {
+  garment: 'cat-garment',
+  saree: 'cat-saree',
+  fabric: 'cat-fabric',
+} as const
+
 export function migrate() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -35,6 +47,21 @@ export function migrate() {
       city TEXT,
       pricing_settings TEXT,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS categories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT,
+      base_type TEXT NOT NULL,
+      wholesale_markup_pct REAL NOT NULL DEFAULT 20,
+      mrp_markup_pct REAL NOT NULL DEFAULT 100,
+      sale_discount_from_mrp_pct REAL NOT NULL DEFAULT 20,
+      sort_order INTEGER NOT NULL DEFAULT 100,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS products (
@@ -157,8 +184,10 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_sales_bill ON sales(bill_no);
     CREATE INDEX IF NOT EXISTS idx_products_type ON products(type);
     CREATE INDEX IF NOT EXISTS idx_sizes_product ON product_sizes(product_id);
+    CREATE INDEX IF NOT EXISTS idx_categories_active ON categories(active);
   `)
   ensureFourPriceColumns()
+  ensureCategories()
 }
 
 function tableColumns(table: string): Set<string> {
@@ -192,13 +221,114 @@ function ensureFourPriceColumns() {
     db.exec('ALTER TABLE store_profile ADD COLUMN pricing_settings TEXT')
   }
   const defaultPricing = JSON.stringify({
-    garment: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
-    saree: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
-    fabric: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+    garment: { ...DEFAULT_CATEGORY_RULES },
+    saree: { ...DEFAULT_CATEGORY_RULES },
+    fabric: { ...DEFAULT_CATEGORY_RULES },
   })
   db.prepare(
     `UPDATE store_profile SET pricing_settings = ? WHERE pricing_settings IS NULL OR pricing_settings = ''`,
   ).run(defaultPricing)
+}
+
+/** Seed default categories and backfill products.category_id from type. */
+function ensureCategories() {
+  const productCols = tableColumns('products')
+  if (!productCols.has('category_id')) {
+    db.exec('ALTER TABLE products ADD COLUMN category_id TEXT')
+  }
+
+  const count = (db.prepare('SELECT COUNT(*) as c FROM categories').get() as { c: number }).c
+  if (count === 0) {
+    const t = nowIso()
+    // Prefer store pricing_settings if present
+    let rules = {
+      garment: { ...DEFAULT_CATEGORY_RULES },
+      saree: { ...DEFAULT_CATEGORY_RULES },
+      fabric: { ...DEFAULT_CATEGORY_RULES },
+    }
+    try {
+      const store = db.prepare('SELECT pricing_settings FROM store_profile LIMIT 1').get() as
+        | { pricing_settings?: string }
+        | undefined
+      if (store?.pricing_settings) {
+        const parsed = JSON.parse(store.pricing_settings)
+        rules = {
+          garment: { ...DEFAULT_CATEGORY_RULES, ...(parsed.garment || {}) },
+          saree: { ...DEFAULT_CATEGORY_RULES, ...(parsed.saree || {}) },
+          fabric: { ...DEFAULT_CATEGORY_RULES, ...(parsed.fabric || {}) },
+        }
+      }
+    } catch {
+      /* keep defaults */
+    }
+
+    const ins = db.prepare(
+      `INSERT INTO categories
+        (id, name, slug, base_type, wholesale_markup_pct, mrp_markup_pct, sale_discount_from_mrp_pct,
+         sort_order, active, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+    )
+    const seeds: Array<{
+      id: string
+      name: string
+      slug: string
+      base: 'garment' | 'saree' | 'fabric'
+      sort: number
+    }> = [
+      {
+        id: DEFAULT_CATEGORY_IDS.garment,
+        name: 'Ready-made / Garment',
+        slug: 'ready-made-garment',
+        base: 'garment',
+        sort: 10,
+      },
+      {
+        id: DEFAULT_CATEGORY_IDS.saree,
+        name: 'Saree',
+        slug: 'saree',
+        base: 'saree',
+        sort: 20,
+      },
+      {
+        id: DEFAULT_CATEGORY_IDS.fabric,
+        name: 'Than / Fabric',
+        slug: 'than-fabric',
+        base: 'fabric',
+        sort: 30,
+      },
+    ]
+    for (const s of seeds) {
+      const r = rules[s.base]
+      ins.run(
+        s.id,
+        s.name,
+        s.slug,
+        s.base,
+        r.wholesaleMarkupPct,
+        r.mrpMarkupPct,
+        r.saleDiscountFromMrpPct,
+        s.sort,
+        t,
+        t,
+      )
+    }
+  }
+
+  // Backfill products missing category_id from type
+  db.prepare(
+    `UPDATE products SET category_id = ? WHERE (category_id IS NULL OR category_id = '') AND type = 'garment'`,
+  ).run(DEFAULT_CATEGORY_IDS.garment)
+  db.prepare(
+    `UPDATE products SET category_id = ? WHERE (category_id IS NULL OR category_id = '') AND type = 'saree'`,
+  ).run(DEFAULT_CATEGORY_IDS.saree)
+  db.prepare(
+    `UPDATE products SET category_id = ? WHERE (category_id IS NULL OR category_id = '') AND type = 'fabric'`,
+  ).run(DEFAULT_CATEGORY_IDS.fabric)
+  db.prepare(
+    `UPDATE products SET category_id = ? WHERE (category_id IS NULL OR category_id = '')`,
+  ).run(DEFAULT_CATEGORY_IDS.garment)
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)')
 }
 
 export function stockQtyFromLine(unit: string, quantity: number) {
@@ -233,6 +363,23 @@ export function applyStockDelta(
   }
 }
 
+export function rowCategory(r: Record<string, unknown>) {
+  return {
+    id: r.id,
+    name: r.name,
+    slug: r.slug,
+    baseType: r.base_type,
+    wholesaleMarkupPct: Number(r.wholesale_markup_pct),
+    mrpMarkupPct: Number(r.mrp_markup_pct),
+    saleDiscountFromMrpPct: Number(r.sale_discount_from_mrp_pct),
+    sortOrder: Number(r.sort_order),
+    active: Number(r.active) === 1 && !r.deleted_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    deletedAt: r.deleted_at,
+  }
+}
+
 export function rowProduct(r: Record<string, unknown>) {
   const sizes = db
     .prepare(
@@ -249,11 +396,22 @@ export function rowProduct(r: Record<string, unknown>) {
     r.mrp != null && Number.isFinite(Number(r.mrp))
       ? Number(r.mrp)
       : Math.round(cost * 2 * 100) / 100
+  const type = String(r.type || 'garment')
+  let categoryId = r.category_id ? String(r.category_id) : ''
+  if (!categoryId) {
+    categoryId =
+      type === 'saree'
+        ? DEFAULT_CATEGORY_IDS.saree
+        : type === 'fabric'
+          ? DEFAULT_CATEGORY_IDS.fabric
+          : DEFAULT_CATEGORY_IDS.garment
+  }
   return {
     id: r.id,
     sku: r.sku,
     name: r.name,
-    type: r.type,
+    type,
+    categoryId,
     unit: r.unit,
     sellingPrice: sale,
     salePrice: sale,
@@ -276,6 +434,10 @@ export function getSnapshot() {
   const users = db
     .prepare('SELECT id, username, role, name, created_at as createdAt FROM users')
     .all()
+  const categories = (db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all() as Record<
+    string,
+    unknown
+  >[]).map(rowCategory)
   const products = (db.prepare('SELECT * FROM products').all() as Record<string, unknown>[]).map(rowProduct)
   const suppliers = db
     .prepare(
@@ -350,6 +512,7 @@ export function getSnapshot() {
         }
       : null,
     users,
+    categories,
     products,
     suppliers,
     purchases,

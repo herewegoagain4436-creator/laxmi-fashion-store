@@ -1,5 +1,11 @@
 import { db } from './db'
-import { computePricesFromPurchase, DEFAULT_PRICING_SETTINGS, round2 } from './lib/pricing'
+import {
+  computePricesFromPurchase,
+  DEFAULT_PRICING_SETTINGS,
+  defaultCategoryIdForType,
+  defaultSeedCategories,
+  round2,
+} from './lib/pricing'
 import type { Product, ProductSize, Supplier } from './types'
 
 function withFourPrices(cost: number, sale: number, type: Product['type']): Pick<
@@ -12,7 +18,6 @@ function withFourPrices(cost: number, sale: number, type: Product['type']): Pick
     costPrice: cost,
     wholesalePrice: derived.wholesalePrice,
     mrp: derived.mrp,
-    // Keep catalog retail when provided; otherwise use derived sale
     salePrice: sale > 0 ? sale : derived.salePrice,
     sellingPrice: sale > 0 ? sale : derived.salePrice,
   }
@@ -20,8 +25,15 @@ function withFourPrices(cost: number, sale: number, type: Product['type']): Pick
 
 export async function seedCatalogIfEmpty() {
   const n = await db.products.count()
-  if (n > 0) return
+  if (n > 0) {
+    // Ensure categories exist even if products already seeded
+    const cn = await db.categories.count()
+    if (cn === 0) await db.categories.bulkPut(defaultSeedCategories())
+    return
+  }
   const t = new Date().toISOString()
+  await db.categories.bulkPut(defaultSeedCategories(t))
+
   const sizes: ProductSize[] = []
   const products: Product[] = []
 
@@ -39,6 +51,7 @@ export async function seedCatalogIfEmpty() {
       sku,
       name,
       type: 'garment',
+      categoryId: defaultCategoryIdForType('garment'),
       unit: 'piece',
       ...withFourPrices(cost, price, 'garment'),
       quantity: 0,
@@ -72,6 +85,7 @@ export async function seedCatalogIfEmpty() {
       sku: sku as string,
       name: name as string,
       type: tpe,
+      categoryId: defaultCategoryIdForType(tpe),
       unit: tpe === 'fabric' ? ('metre' as const) : ('piece' as const),
       ...withFourPrices(Number(cost), Number(price), tpe),
       quantity: Number(qty),
@@ -84,7 +98,6 @@ export async function seedCatalogIfEmpty() {
 
   products.push(...pieces)
 
-  // Ensure MRP is at least sale for seeded catalog realism
   for (const p of products) {
     if (p.mrp < p.salePrice) p.mrp = round2(p.salePrice * 1.25)
   }

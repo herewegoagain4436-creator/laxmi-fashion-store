@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Search, Trash2, X } from 'lucide-react'
-import { db, enqueue, getPricingSettings, productsWithSizes } from '../db'
+import { db, enqueue, getRulesForProduct, productsWithSizes } from '../db'
 import { useAuth } from '../auth'
 import { inr, qtyLabel, typeLabel } from '../lib/format'
 import { uid } from '../lib/ids'
@@ -149,9 +149,9 @@ export function Purchases() {
   async function applyCostAndMaybeDerive(nextCost: string) {
     setCost(nextCost)
     if (derivedTouched || !pick) return
-    const settings = await getPricingSettings()
+    const rules = await getRulesForProduct(pick)
     const purchase = Number(nextCost) || 0
-    const derived = computePricesFromPurchase(purchase, settings, pick.type)
+    const derived = computePricesFromPurchase(purchase, rules)
     setWholesale(String(derived.wholesalePrice))
     setMrp(String(derived.mrp))
     setSale(String(derived.salePrice))
@@ -159,9 +159,9 @@ export function Purchases() {
 
   async function recalculateFromPurchase() {
     if (!pick) return
-    const settings = await getPricingSettings()
+    const rules = await getRulesForProduct(pick)
     const purchase = Number(cost) || 0
-    const derived = computePricesFromPurchase(purchase, settings, pick.type)
+    const derived = computePricesFromPurchase(purchase, rules)
     setWholesale(String(derived.wholesalePrice))
     setMrp(String(derived.mrp))
     setSale(String(derived.salePrice))
@@ -354,8 +354,11 @@ export function Purchases() {
   async function recalcLineFromPurchase(key: string) {
     const line = lines.find((l) => l.key === key)
     if (!line) return
-    const settings = await getPricingSettings()
-    const derived = computePricesFromPurchase(line.unitCost, settings, line.type as Product['type'])
+    const prod = products.find((p) => p.id === line.productId)
+    const rules = await getRulesForProduct(
+      prod || { type: line.type as Product['type'], categoryId: undefined },
+    )
+    const derived = computePricesFromPurchase(line.unitCost, rules)
     updateLine(key, derived)
   }
 

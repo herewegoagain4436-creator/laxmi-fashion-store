@@ -1,11 +1,17 @@
 import crypto from 'node:crypto'
-import { db, nowIso } from './db.js'
+import { db, DEFAULT_CATEGORY_IDS, nowIso } from './db.js'
 
 export function hashPassword(password: string) {
   return crypto.createHash('sha256').update('laxmi-v1:' + password).digest('hex')
 }
 
 const STANDARD = ['S', 'M', 'L', 'XL', 'XXL'] as const
+
+const DEFAULT_RULES = {
+  wholesaleMarkupPct: 20,
+  mrpMarkupPct: 100,
+  saleDiscountFromMrpPct: 20,
+}
 
 export function seedIfEmpty() {
   const n = db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }
@@ -19,9 +25,9 @@ export function seedIfEmpty() {
   insertUser.run('user-cashier', 'cashier', hashPassword('cashier123'), 'cashier', 'Counter Cashier', t)
 
   const defaultPricing = JSON.stringify({
-    garment: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
-    saree: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
-    fabric: { wholesaleMarkupPct: 20, mrpMarkupPct: 100, saleDiscountFromMrpPct: 20 },
+    garment: { ...DEFAULT_RULES },
+    saree: { ...DEFAULT_RULES },
+    fabric: { ...DEFAULT_RULES },
   })
   db.prepare(
     'INSERT INTO store_profile (id, name, address, phone, city, pricing_settings, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -34,6 +40,53 @@ export function seedIfEmpty() {
     defaultPricing,
     t,
   )
+
+  // Categories are seeded by migrate()/ensureCategories(); only insert if missing.
+  const catCount = (db.prepare('SELECT COUNT(*) as c FROM categories').get() as { c: number }).c
+  if (catCount === 0) {
+    const insertCat = db.prepare(
+      `INSERT INTO categories
+        (id, name, slug, base_type, wholesale_markup_pct, mrp_markup_pct, sale_discount_from_mrp_pct,
+         sort_order, active, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+    )
+    insertCat.run(
+      DEFAULT_CATEGORY_IDS.garment,
+      'Ready-made / Garment',
+      'ready-made-garment',
+      'garment',
+      DEFAULT_RULES.wholesaleMarkupPct,
+      DEFAULT_RULES.mrpMarkupPct,
+      DEFAULT_RULES.saleDiscountFromMrpPct,
+      10,
+      t,
+      t,
+    )
+    insertCat.run(
+      DEFAULT_CATEGORY_IDS.saree,
+      'Saree',
+      'saree',
+      'saree',
+      DEFAULT_RULES.wholesaleMarkupPct,
+      DEFAULT_RULES.mrpMarkupPct,
+      DEFAULT_RULES.saleDiscountFromMrpPct,
+      20,
+      t,
+      t,
+    )
+    insertCat.run(
+      DEFAULT_CATEGORY_IDS.fabric,
+      'Than / Fabric',
+      'than-fabric',
+      'fabric',
+      DEFAULT_RULES.wholesaleMarkupPct,
+      DEFAULT_RULES.mrpMarkupPct,
+      DEFAULT_RULES.saleDiscountFromMrpPct,
+      30,
+      t,
+      t,
+    )
+  }
 
   db.prepare(
     `INSERT INTO suppliers (id, name, phone, address, notes, created_at, updated_at)
@@ -50,8 +103,8 @@ export function seedIfEmpty() {
 
   const insertProduct = db.prepare(
     `INSERT INTO products
-      (id, sku, name, type, unit, selling_price, cost_price, wholesale_price, mrp, quantity, low_stock_threshold, fabric_sell_unit, created_at, updated_at)
-     VALUES (@id, @sku, @name, @type, @unit, @selling_price, @cost_price, @wholesale_price, @mrp, @quantity, @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at)`,
+      (id, sku, name, type, category_id, unit, selling_price, cost_price, wholesale_price, mrp, quantity, low_stock_threshold, fabric_sell_unit, created_at, updated_at)
+     VALUES (@id, @sku, @name, @type, @category_id, @unit, @selling_price, @cost_price, @wholesale_price, @mrp, @quantity, @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at)`,
   )
   function four(cost: number, sale: number) {
     return {
@@ -72,7 +125,6 @@ export function seedIfEmpty() {
     price: number
     cost: number
     sizes: Record<string, number>
-    extra?: Record<string, number>
   }> = [
     {
       id: 'p-kurti-cotton',
@@ -122,6 +174,7 @@ export function seedIfEmpty() {
       sku: g.sku,
       name: g.name,
       type: 'garment',
+      category_id: DEFAULT_CATEGORY_IDS.garment,
       unit: 'piece',
       ...four(g.cost, g.price),
       quantity: 0,
@@ -133,7 +186,6 @@ export function seedIfEmpty() {
     for (const [size, qty] of Object.entries(g.sizes)) {
       insertSize.run(`${g.id}-${size}`, g.id, size, qty)
     }
-    // ensure standard chips exist even if 0 (except products that use custom/free only)
     if (g.id !== 'p-nightwear' && g.id !== 'p-frock') {
       for (const s of STANDARD) {
         if (g.sizes[s] == null) insertSize.run(`${g.id}-${s}`, g.id, s, 0)
@@ -152,6 +204,7 @@ export function seedIfEmpty() {
       sku: s.sku,
       name: s.name,
       type: 'saree',
+      category_id: DEFAULT_CATEGORY_IDS.saree,
       unit: 'piece',
       ...four(s.cost, s.price),
       quantity: s.qty,
@@ -173,6 +226,7 @@ export function seedIfEmpty() {
       sku: f.sku,
       name: f.name,
       type: 'fabric',
+      category_id: DEFAULT_CATEGORY_IDS.fabric,
       unit: 'metre',
       ...four(f.cost, f.price),
       quantity: f.qty,

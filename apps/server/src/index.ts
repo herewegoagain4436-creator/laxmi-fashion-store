@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import cors from 'cors'
-import { applyStockDelta, db, getSnapshot, migrate, nowIso, rowProduct } from './db.js'
+import { applyStockDelta, db, DEFAULT_CATEGORY_IDS, getSnapshot, migrate, nowIso, rowCategory, rowProduct } from './db.js'
 import { hashPassword, seedIfEmpty } from './seed.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -117,14 +117,69 @@ function resolveProductPrices(p: Record<string, unknown>) {
   return { cost, sale, wholesale, mrp }
 }
 
+
+function resolveCategoryId(p: Record<string, unknown>): string {
+  if (p.categoryId) return String(p.categoryId)
+  const type = String(p.type || 'garment')
+  if (type === 'saree') return DEFAULT_CATEGORY_IDS.saree
+  if (type === 'fabric') return DEFAULT_CATEGORY_IDS.fabric
+  return DEFAULT_CATEGORY_IDS.garment
+}
+
+function resolveTypeFromCategory(categoryId: string, fallback: string): string {
+  const cat = db.prepare('SELECT base_type FROM categories WHERE id = ?').get(categoryId) as
+    | { base_type: string }
+    | undefined
+  return cat?.base_type || fallback || 'garment'
+}
+
+function upsertCategory(c: Record<string, unknown>) {
+  const id = String(c.id)
+  const t = String(c.updatedAt || nowIso())
+  const existing = db.prepare('SELECT id FROM categories WHERE id = ?').get(id)
+  const active = c.active === false || c.deletedAt ? 0 : 1
+  const params = {
+    id,
+    name: String(c.name || 'Category'),
+    slug: c.slug ?? null,
+    base_type: String(c.baseType || 'garment'),
+    wholesale_markup_pct: Number(c.wholesaleMarkupPct ?? 20),
+    mrp_markup_pct: Number(c.mrpMarkupPct ?? 100),
+    sale_discount_from_mrp_pct: Number(c.saleDiscountFromMrpPct ?? 20),
+    sort_order: Number(c.sortOrder ?? 100),
+    active,
+    created_at: String(c.createdAt || t),
+    updated_at: t,
+    deleted_at: c.deletedAt ?? null,
+  }
+  if (existing) {
+    db.prepare(
+      `UPDATE categories SET name=@name, slug=@slug, base_type=@base_type,
+        wholesale_markup_pct=@wholesale_markup_pct, mrp_markup_pct=@mrp_markup_pct,
+        sale_discount_from_mrp_pct=@sale_discount_from_mrp_pct, sort_order=@sort_order,
+        active=@active, updated_at=@updated_at, deleted_at=@deleted_at WHERE id=@id`,
+    ).run(params)
+  } else {
+    db.prepare(
+      `INSERT INTO categories
+        (id, name, slug, base_type, wholesale_markup_pct, mrp_markup_pct, sale_discount_from_mrp_pct,
+         sort_order, active, created_at, updated_at, deleted_at)
+       VALUES (@id, @name, @slug, @base_type, @wholesale_markup_pct, @mrp_markup_pct,
+         @sale_discount_from_mrp_pct, @sort_order, @active, @created_at, @updated_at, @deleted_at)`,
+    ).run(params)
+  }
+}
+
 function upsertProduct(p: Record<string, unknown>) {
   const id = String(p.id)
   const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(id)
   const t = String(p.updatedAt || nowIso())
   const { cost, sale, wholesale, mrp } = resolveProductPrices(p)
+  const categoryId = resolveCategoryId(p)
+  const type = resolveTypeFromCategory(categoryId, String(p.type || 'garment'))
   if (existing) {
     db.prepare(
-      `UPDATE products SET sku=@sku, name=@name, type=@type, unit=@unit,
+      `UPDATE products SET sku=@sku, name=@name, type=@type, category_id=@category_id, unit=@unit,
         selling_price=@selling_price, cost_price=@cost_price,
         wholesale_price=@wholesale_price, mrp=@mrp, quantity=@quantity,
         low_stock_threshold=@low_stock_threshold, fabric_sell_unit=@fabric_sell_unit,
@@ -133,7 +188,8 @@ function upsertProduct(p: Record<string, unknown>) {
       id,
       sku: p.sku,
       name: p.name,
-      type: p.type,
+      type,
+      category_id: categoryId,
       unit: p.unit,
       selling_price: sale,
       cost_price: cost,
@@ -148,17 +204,18 @@ function upsertProduct(p: Record<string, unknown>) {
     db.prepare('DELETE FROM product_sizes WHERE product_id = ?').run(id)
   } else {
     db.prepare(
-      `INSERT INTO products (id, sku, name, type, unit, selling_price, cost_price,
+      `INSERT INTO products (id, sku, name, type, category_id, unit, selling_price, cost_price,
         wholesale_price, mrp, quantity,
         low_stock_threshold, fabric_sell_unit, created_at, updated_at, deleted_at)
-       VALUES (@id, @sku, @name, @type, @unit, @selling_price, @cost_price,
+       VALUES (@id, @sku, @name, @type, @category_id, @unit, @selling_price, @cost_price,
         @wholesale_price, @mrp, @quantity,
         @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at, @deleted_at)`,
     ).run({
       id,
       sku: p.sku,
       name: p.name,
-      type: p.type,
+      type,
+      category_id: categoryId,
       unit: p.unit,
       selling_price: sale,
       cost_price: cost,
@@ -432,9 +489,13 @@ function createReturn(r: Record<string, unknown>) {
 
 app.post('/api/sync', auth, (req: Authed, res) => {
   const body = req.body || {}
-  const results: Record<string, unknown> = { products: [], suppliers: [], purchases: [], sales: [], returns: [] }
+  const results: Record<string, unknown> = { categories: [], products: [], suppliers: [], purchases: [], sales: [], returns: [] }
   try {
     const tx = db.transaction(() => {
+      for (const c of body.categories || []) {
+        upsertCategory(c)
+        ;(results.categories as unknown[]).push({ id: c.id, ok: true })
+      }
       for (const p of body.products || []) {
         upsertProduct(p)
         ;(results.products as unknown[]).push({ id: p.id, ok: true })
@@ -474,6 +535,20 @@ app.post('/api/sync', auth, (req: Authed, res) => {
     console.error(err)
     res.status(500).json({ error: 'Sync failed', detail: String(err) })
   }
+})
+
+
+app.get('/api/categories', auth, (_req, res) => {
+  const rows = db
+    .prepare('SELECT * FROM categories WHERE deleted_at IS NULL ORDER BY sort_order, name')
+    .all() as Record<string, unknown>[]
+  res.json(rows.map(rowCategory))
+})
+
+app.post('/api/categories', auth, ownerOnly, (req: Authed, res) => {
+  upsertCategory(req.body)
+  const row = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.body.id) as Record<string, unknown>
+  res.json(rowCategory(row))
 })
 
 app.get('/api/products', auth, (_req, res) => {

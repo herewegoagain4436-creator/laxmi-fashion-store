@@ -3,18 +3,19 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { useAuth } from '../auth'
 import { SizeChips } from '../components/SizeChips'
-import { db, enqueue, getPricingSettings, productsWithSizes } from '../db'
-import { inr, isLowStock, productStock, typeLabel } from '../lib/format'
+import { db, enqueue, getActiveCategories, getRulesForProduct, productsWithSizes } from '../db'
+import { baseTypeHint, inr, isLowStock, productStock, typeLabel } from '../lib/format'
 import { uid } from '../lib/ids'
-import { computePricesFromPurchase, normalizeProductPrices } from '../lib/pricing'
+import { computePricesFromPurchase, defaultCategoryIdForType, normalizeProductPrices } from '../lib/pricing'
 import { flushOutbox } from '../sync'
-import type { Product, ProductSize, ProductType } from '../types'
+import type { Category, Product, ProductSize, ProductType } from '../types'
 import { STANDARD_SIZES } from '../types'
 
-const emptyForm = () => ({
+const emptyForm = (defaultCatId: string, baseType: ProductType) => ({
   name: '',
   sku: '',
-  type: 'garment' as ProductType,
+  categoryId: defaultCatId,
+  type: baseType,
   purchasePrice: '',
   wholesalePrice: '',
   mrp: '',
@@ -30,22 +31,49 @@ export function Inventory() {
   const { user } = useAuth()
   const owner = user?.role === 'owner'
   const products = useLiveQuery(() => productsWithSizes(), []) || []
+  const categories =
+    useLiveQuery(async () => {
+      return getActiveCategories()
+    }, []) || []
+  const allCategories =
+    useLiveQuery(async () => {
+      const all = await db.categories.toArray()
+      return all.filter((c) => !c.deletedAt)
+    }, []) || []
+
   const [q, setQ] = useState('')
-  const [tab, setTab] = useState<'all' | ProductType | 'low'>('all')
+  const [tab, setTab] = useState<'all' | 'low' | string>('all')
   const [form, setForm] = useState<ReturnType<typeof emptyForm> | null>(null)
   const [editId, setEditId] = useState<string | null>(null)
   const [sizeQtys, setSizeQtys] = useState<Record<string, string>>({})
   const [derivedTouched, setDerivedTouched] = useState(false)
 
+  const catById = useMemo(() => {
+    const m = new Map<string, Category>()
+    for (const c of allCategories) m.set(c.id, c)
+    for (const c of categories) m.set(c.id, c)
+    return m
+  }, [categories, allCategories])
+
   const filtered = useMemo(() => {
     return products.filter((p) => {
       if (tab === 'low' && !isLowStock(p)) return false
-      if (tab !== 'all' && tab !== 'low' && p.type !== tab) return false
+      if (tab !== 'all' && tab !== 'low' && p.categoryId !== tab && p.type !== tab) return false
       const s = q.trim().toLowerCase()
       if (!s) return true
-      return p.name.toLowerCase().includes(s) || p.sku.toLowerCase().includes(s)
+      const catName = catById.get(p.categoryId)?.name || ''
+      return (
+        p.name.toLowerCase().includes(s) ||
+        p.sku.toLowerCase().includes(s) ||
+        catName.toLowerCase().includes(s)
+      )
     })
-  }, [products, q, tab])
+  }, [products, q, tab, catById])
+
+  function categoryLabel(p: Product) {
+    const c = catById.get(p.categoryId)
+    return c?.name || typeLabel(p.type)
+  }
 
   function openEdit(p?: Product) {
     setDerivedTouched(false)
@@ -55,10 +83,13 @@ export function Inventory() {
       const sq: Record<string, string> = {}
       for (const s of p.sizes || []) sq[s.size] = String(s.quantity)
       setSizeQtys(sq)
+      const catId = p.categoryId || defaultCategoryIdForType(p.type)
+      const cat = catById.get(catId)
       setForm({
         name: p.name,
         sku: p.sku,
-        type: p.type,
+        categoryId: catId,
+        type: cat?.baseType || p.type,
         purchasePrice: String(n.purchasePrice),
         wholesalePrice: String(n.wholesalePrice),
         mrp: String(n.mrp),
@@ -74,15 +105,18 @@ export function Inventory() {
       const sq: Record<string, string> = {}
       for (const s of STANDARD_SIZES) sq[s] = ''
       setSizeQtys(sq)
-      setForm(emptyForm())
+      const first = categories[0]
+      const catId = first?.id || defaultCategoryIdForType('garment')
+      const base = first?.baseType || 'garment'
+      setForm(emptyForm(catId, base))
     }
   }
 
   async function applyRecalc() {
     if (!form) return
-    const settings = await getPricingSettings()
+    const rules = await getRulesForProduct({ categoryId: form.categoryId, type: form.type })
     const purchase = Number(form.purchasePrice) || 0
-    const derived = computePricesFromPurchase(purchase, settings, form.type)
+    const derived = computePricesFromPurchase(purchase, rules)
     setForm({
       ...form,
       wholesalePrice: String(derived.wholesalePrice),
@@ -96,9 +130,9 @@ export function Inventory() {
     if (!form) return
     const next = { ...form, purchasePrice: value }
     if (!derivedTouched) {
-      const settings = await getPricingSettings()
+      const rules = await getRulesForProduct({ categoryId: form.categoryId, type: form.type })
       const purchase = Number(value) || 0
-      const derived = computePricesFromPurchase(purchase, settings, form.type)
+      const derived = computePricesFromPurchase(purchase, rules)
       next.wholesalePrice = String(derived.wholesalePrice)
       next.mrp = String(derived.mrp)
       next.salePrice = String(derived.salePrice)
@@ -106,13 +140,21 @@ export function Inventory() {
     setForm(next)
   }
 
-  async function onTypeChange(type: ProductType) {
+  async function onCategoryChange(categoryId: string) {
     if (!form) return
-    const next = { ...form, type }
+    const cat = catById.get(categoryId) || categories.find((c) => c.id === categoryId)
+    const type = (cat?.baseType || form.type) as ProductType
+    const next = { ...form, categoryId, type }
     if (!derivedTouched && form.purchasePrice) {
-      const settings = await getPricingSettings()
+      const rules = cat
+        ? {
+            wholesaleMarkupPct: cat.wholesaleMarkupPct,
+            mrpMarkupPct: cat.mrpMarkupPct,
+            saleDiscountFromMrpPct: cat.saleDiscountFromMrpPct,
+          }
+        : await getRulesForProduct({ categoryId, type })
       const purchase = Number(form.purchasePrice) || 0
-      const derived = computePricesFromPurchase(purchase, settings, type)
+      const derived = computePricesFromPurchase(purchase, rules)
       next.wholesalePrice = String(derived.wholesalePrice)
       next.mrp = String(derived.mrp)
       next.salePrice = String(derived.salePrice)
@@ -122,6 +164,10 @@ export function Inventory() {
 
   async function save() {
     if (!form || !owner) return
+    if (!form.categoryId) {
+      alert('Select a category')
+      return
+    }
     const t = new Date().toISOString()
     const id = editId || uid()
     let sizes: ProductSize[] = []
@@ -142,6 +188,7 @@ export function Inventory() {
       sku: form.sku.trim() || `SKU-${id.slice(0, 8)}`,
       name: form.name.trim(),
       type: form.type,
+      categoryId: form.categoryId,
       unit: form.type === 'fabric' ? 'metre' : 'piece',
       purchasePrice: purchase,
       costPrice: purchase,
@@ -174,6 +221,22 @@ export function Inventory() {
     void flushOutbox()
   }
 
+  const filterTabs: Array<{ key: string; label: string }> = [
+    { key: 'all', label: 'All' },
+    ...categories.map((c) => ({ key: c.id, label: c.name })),
+    { key: 'low', label: 'Low stock' },
+  ]
+
+  // For edit form: include inactive category if product still uses it
+  const formCategoryOptions = useMemo(() => {
+    const list = [...categories]
+    if (form?.categoryId && !list.some((c) => c.id === form.categoryId)) {
+      const orphan = catById.get(form.categoryId)
+      if (orphan) list.unshift(orphan)
+    }
+    return list
+  }, [categories, form?.categoryId, catById])
+
   return (
     <div className="mx-auto max-w-6xl">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -198,16 +261,16 @@ export function Inventory() {
         />
       </div>
       <div className="mb-3 flex flex-wrap gap-2">
-        {(['all', 'garment', 'saree', 'fabric', 'low'] as const).map((t) => (
+        {filterTabs.map((t) => (
           <button
-            key={t}
+            key={t.key}
             type="button"
-            onClick={() => setTab(t)}
+            onClick={() => setTab(t.key)}
             className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
-              tab === t ? 'bg-brand-700 text-white' : 'bg-white text-brand-800 border'
+              tab === t.key ? 'bg-brand-700 text-white' : 'bg-white text-brand-800 border'
             }`}
           >
-            {t === 'low' ? 'Low stock' : t === 'all' ? 'All' : typeLabel(t)}
+            {t.label}
           </button>
         ))}
       </div>
@@ -216,7 +279,7 @@ export function Inventory() {
           <thead className="bg-brand-50 text-brand-900">
             <tr>
               <th className="px-3 py-2">Product</th>
-              <th className="px-3 py-2">Type</th>
+              <th className="px-3 py-2">Category</th>
               <th className="px-3 py-2">Stock</th>
               <th className="px-3 py-2">Purchase</th>
               <th className="px-3 py-2">Wholesale</th>
@@ -245,7 +308,10 @@ export function Inventory() {
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2">{typeLabel(p.type)}</td>
+                  <td className="px-3 py-2">
+                    <div>{categoryLabel(p)}</div>
+                    <div className="text-[11px] text-slate-400">{typeLabel(p.type)}</div>
+                  </td>
                   <td className="px-3 py-2">
                     <span className={low ? 'font-bold text-amber-700' : ''}>
                       {p.type === 'fabric' ? `${stock} m` : `${stock} pcs`}
@@ -292,20 +358,23 @@ export function Inventory() {
                 value={form.sku}
                 onChange={(e) => setForm({ ...form, sku: e.target.value })}
               />
-              <div className="grid grid-cols-3 gap-2">
-                {(['garment', 'saree', 'fabric'] as ProductType[]).map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => void onTypeChange(t)}
-                    className={`min-h-[44px] rounded-xl border text-sm font-semibold ${
-                      form.type === t ? 'border-brand-500 bg-brand-50' : ''
-                    }`}
-                  >
-                    {typeLabel(t)}
-                  </button>
-                ))}
-              </div>
+              <label className="block text-sm font-medium">
+                Category
+                <select
+                  className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+                  value={form.categoryId}
+                  onChange={(e) => void onCategoryChange(e.target.value)}
+                >
+                  {formCategoryOptions.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({typeLabel(c.baseType)} · {baseTypeHint(c.baseType)})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="text-[11px] text-slate-500">
+                Stock behaviour: {typeLabel(form.type)} ({baseTypeHint(form.type)})
+              </p>
 
               <div className="rounded-xl border border-brand-100 bg-cream/40 p-3">
                 <div className="mb-2 flex items-center justify-between gap-2">
@@ -370,8 +439,8 @@ export function Inventory() {
                   </label>
                 </div>
                 <p className="mt-2 text-[11px] text-slate-500">
-                  Changing purchase auto-fills wholesale / MRP / sale from category rules until you edit them.
-                  Use Recalculate to re-apply.
+                  Changing purchase auto-fills wholesale / MRP / sale from this category&apos;s rules until you edit
+                  them. Use Recalculate to re-apply.
                 </p>
               </div>
 

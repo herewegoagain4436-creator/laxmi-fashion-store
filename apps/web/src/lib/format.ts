@@ -56,8 +56,15 @@ export function isLowStock(p: {
 }
 
 export function typeLabel(t: string) {
-  if (t === 'garment') return 'Garment'
+  if (t === 'garment') return 'Ready-made'
   if (t === 'saree') return 'Saree'
   if (t === 'fabric') return 'Than / Fabric'
+  return t
+}
+
+export function baseTypeHint(t: string) {
+  if (t === 'garment') return 'sizes'
+  if (t === 'saree') return 'piece'
+  if (t === 'fabric') return 'metre / cm'
   return t
 }

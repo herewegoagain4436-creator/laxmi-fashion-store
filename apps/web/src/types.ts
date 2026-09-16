@@ -1,4 +1,5 @@
 export type Role = 'owner' | 'cashier'
+/** Stock behaviour base type (sizes / piece / metre). */
 export type ProductType = 'garment' | 'saree' | 'fabric'
 export type PaymentMode = 'cash' | 'upi' | 'card' | 'split'
 export type SaleStatus = 'completed' | 'returned' | 'partial_return'
@@ -17,11 +18,30 @@ export type CategoryPricingRules = {
   saleDiscountFromMrpPct: number
 }
 
-/** Per product-type pricing rules (garment / saree / fabric). */
+/** @deprecated Prefer per-category pricing on Category. Kept for backward compatibility. */
 export type PricingSettings = {
   garment: CategoryPricingRules
   saree: CategoryPricingRules
   fabric: CategoryPricingRules
+}
+
+/**
+ * Admin-managed product category.
+ * baseType controls stock behaviour; pricing % drive auto-calc.
+ */
+export type Category = {
+  id: string
+  name: string
+  slug?: string | null
+  baseType: ProductType
+  wholesaleMarkupPct: number
+  mrpMarkupPct: number
+  saleDiscountFromMrpPct: number
+  sortOrder: number
+  active: boolean
+  createdAt: string
+  updatedAt: string
+  deletedAt?: string | null
 }
 
 export type StoreProfile = {
@@ -31,6 +51,7 @@ export type StoreProfile = {
   phone: string
   city: string
   updatedAt: string
+  /** @deprecated Prefer Category pricing fields */
   pricingSettings?: PricingSettings
 }
 
@@ -52,7 +73,10 @@ export type Product = {
   id: string
   sku: string
   name: string
+  /** Stock behaviour — kept in sync with category.baseType */
   type: ProductType
+  /** Required going forward; maps to Category */
+  categoryId: string
   unit: 'piece' | 'metre'
   /** @deprecated prefer salePrice — kept in sync for compatibility */
   sellingPrice: number
@@ -165,7 +189,7 @@ export type ReturnItem = {
 export type OutboxItem = {
   localId?: number
   id: string
-  type: 'product' | 'supplier' | 'purchase' | 'sale' | 'return' | 'store'
+  type: 'product' | 'supplier' | 'purchase' | 'sale' | 'return' | 'store' | 'category'
   payload: unknown
   createdAt: string
   synced: number
@@ -176,6 +200,7 @@ export type OutboxItem = {
 export type Snapshot = {
   store: StoreProfile | null
   users: User[]
+  categories: Category[]
   products: Product[]
   suppliers: Supplier[]
   purchases: Purchase[]
@@ -188,3 +213,10 @@ export type Snapshot = {
 }
 
 export const STANDARD_SIZES = ['S', 'M', 'L', 'XL', 'XXL', 'Free size'] as const
+
+/** Stable IDs for the three default seed categories. */
+export const DEFAULT_CATEGORY_IDS = {
+  garment: 'cat-garment',
+  saree: 'cat-saree',
+  fabric: 'cat-fabric',
+} as const

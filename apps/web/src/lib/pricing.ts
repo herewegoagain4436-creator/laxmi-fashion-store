@@ -1,4 +1,10 @@
-import type { CategoryPricingRules, PricingSettings, ProductType } from '../types'
+import type {
+  Category,
+  CategoryPricingRules,
+  PricingSettings,
+  ProductType,
+} from '../types'
+import { DEFAULT_CATEGORY_IDS } from '../types'
 
 export const DEFAULT_CATEGORY_RULES: CategoryPricingRules = {
   wholesaleMarkupPct: 20,
@@ -10,6 +16,63 @@ export const DEFAULT_PRICING_SETTINGS: PricingSettings = {
   garment: { ...DEFAULT_CATEGORY_RULES },
   saree: { ...DEFAULT_CATEGORY_RULES },
   fabric: { ...DEFAULT_CATEGORY_RULES },
+}
+
+export const BASE_TYPE_LABELS: Record<ProductType, string> = {
+  garment: 'Ready-made / Garment',
+  saree: 'Saree',
+  fabric: 'Than / Fabric',
+}
+
+/** Seed definitions for the three default categories. */
+export function defaultSeedCategories(now = new Date().toISOString()): Category[] {
+  return [
+    {
+      id: DEFAULT_CATEGORY_IDS.garment,
+      name: 'Ready-made / Garment',
+      slug: 'ready-made-garment',
+      baseType: 'garment',
+      ...DEFAULT_CATEGORY_RULES,
+      sortOrder: 10,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: DEFAULT_CATEGORY_IDS.saree,
+      name: 'Saree',
+      slug: 'saree',
+      baseType: 'saree',
+      ...DEFAULT_CATEGORY_RULES,
+      sortOrder: 20,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: DEFAULT_CATEGORY_IDS.fabric,
+      name: 'Than / Fabric',
+      slug: 'than-fabric',
+      baseType: 'fabric',
+      ...DEFAULT_CATEGORY_RULES,
+      sortOrder: 30,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+  ]
+}
+
+export function slugify(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 64)
 }
 
 export function round2(n: number) {
@@ -29,12 +92,45 @@ export function normalizePricingSettings(raw?: Partial<PricingSettings> | null):
   }
 }
 
+export function rulesFromCategory(cat: Category | null | undefined): CategoryPricingRules {
+  if (!cat) return { ...DEFAULT_CATEGORY_RULES }
+  return {
+    wholesaleMarkupPct: Number(cat.wholesaleMarkupPct ?? DEFAULT_CATEGORY_RULES.wholesaleMarkupPct),
+    mrpMarkupPct: Number(cat.mrpMarkupPct ?? DEFAULT_CATEGORY_RULES.mrpMarkupPct),
+    saleDiscountFromMrpPct: Number(
+      cat.saleDiscountFromMrpPct ?? DEFAULT_CATEGORY_RULES.saleDiscountFromMrpPct,
+    ),
+  }
+}
+
 export function rulesForType(settings: PricingSettings | null | undefined, type: ProductType): CategoryPricingRules {
   const s = normalizePricingSettings(settings)
   return s[type] || DEFAULT_CATEGORY_RULES
 }
 
-/** Compute wholesale, MRP, and sale from purchase cost using category rules. */
+/** Normalize a category row (migration / snapshot). */
+export function normalizeCategory(raw: Partial<Category> & { id: string }): Category {
+  const baseType = (raw.baseType || 'garment') as ProductType
+  const now = new Date().toISOString()
+  return {
+    id: raw.id,
+    name: String(raw.name || 'Category'),
+    slug: raw.slug ?? slugify(String(raw.name || raw.id)),
+    baseType,
+    wholesaleMarkupPct: Number(raw.wholesaleMarkupPct ?? DEFAULT_CATEGORY_RULES.wholesaleMarkupPct),
+    mrpMarkupPct: Number(raw.mrpMarkupPct ?? DEFAULT_CATEGORY_RULES.mrpMarkupPct),
+    saleDiscountFromMrpPct: Number(
+      raw.saleDiscountFromMrpPct ?? DEFAULT_CATEGORY_RULES.saleDiscountFromMrpPct,
+    ),
+    sortOrder: Number(raw.sortOrder ?? 100),
+    active: raw.active !== false && !raw.deletedAt,
+    createdAt: raw.createdAt || now,
+    updatedAt: raw.updatedAt || now,
+    deletedAt: raw.deletedAt ?? null,
+  }
+}
+
+/** Compute wholesale, MRP, and sale from purchase cost using category or type rules. */
 export function computePricesFromPurchase(
   purchase: number,
   settings: PricingSettings | CategoryPricingRules | null | undefined,
@@ -91,4 +187,8 @@ export const CATEGORY_LABELS: Record<ProductType, string> = {
   garment: 'Garment / ready-made',
   saree: 'Saree',
   fabric: 'Fabric / than',
+}
+
+export function defaultCategoryIdForType(type: ProductType): string {
+  return DEFAULT_CATEGORY_IDS[type] || DEFAULT_CATEGORY_IDS.garment
 }

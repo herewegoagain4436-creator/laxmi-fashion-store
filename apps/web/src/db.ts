@@ -1,9 +1,20 @@
 import Dexie, { type Table } from 'dexie'
-import { DEFAULT_PRICING_SETTINGS, normalizeProductPrices, normalizePricingSettings } from './lib/pricing'
+import {
+  DEFAULT_PRICING_SETTINGS,
+  defaultCategoryIdForType,
+  defaultSeedCategories,
+  normalizeCategory,
+  normalizeProductPrices,
+  normalizePricingSettings,
+  rulesFromCategory,
+} from './lib/pricing'
 import type {
+  Category,
+  CategoryPricingRules,
   OutboxItem,
   Product,
   ProductSize,
+  ProductType,
   Purchase,
   PurchaseItem,
   ReturnItem,
@@ -22,7 +33,8 @@ export type Meta = { key: string; value: string }
 const STORE_SCHEMA = {
   users: 'id, username, role',
   store: 'id',
-  products: 'id, sku, type, name, updatedAt, deletedAt',
+  categories: 'id, baseType, name, sortOrder, active, deletedAt',
+  products: 'id, sku, type, categoryId, name, updatedAt, deletedAt',
   productSizes: 'id, productId, [productId+size]',
   suppliers: 'id, name',
   purchases: 'id, date, supplierId, createdAt',
@@ -38,6 +50,7 @@ const STORE_SCHEMA = {
 export class LaxmiDB extends Dexie {
   users!: Table<LocalUser, string>
   store!: Table<StoreProfile, string>
+  categories!: Table<Category, string>
   products!: Table<Product, string>
   productSizes!: Table<ProductSize, string>
   suppliers!: Table<SupplierLike, string>
@@ -52,9 +65,37 @@ export class LaxmiDB extends Dexie {
 
   constructor() {
     super('laxmi-fashion-v1')
-    this.version(1).stores({ ...STORE_SCHEMA })
+    this.version(1).stores({
+      users: 'id, username, role',
+      store: 'id',
+      products: 'id, sku, type, name, updatedAt, deletedAt',
+      productSizes: 'id, productId, [productId+size]',
+      suppliers: 'id, name',
+      purchases: 'id, date, supplierId, createdAt',
+      purchaseItems: 'id, purchaseId, productId',
+      sales: 'id, billNo, datetime, status',
+      saleItems: 'id, saleId, productId',
+      returns: 'id, saleId, datetime',
+      returnItems: 'id, returnId, saleItemId',
+      outbox: '++localId, id, type, createdAt, synced',
+      meta: 'key',
+    })
     this.version(2)
-      .stores({ ...STORE_SCHEMA })
+      .stores({
+        users: 'id, username, role',
+        store: 'id',
+        products: 'id, sku, type, name, updatedAt, deletedAt',
+        productSizes: 'id, productId, [productId+size]',
+        suppliers: 'id, name',
+        purchases: 'id, date, supplierId, createdAt',
+        purchaseItems: 'id, purchaseId, productId',
+        sales: 'id, billNo, datetime, status',
+        saleItems: 'id, saleId, productId',
+        returns: 'id, saleId, datetime',
+        returnItems: 'id, returnId, saleItemId',
+        outbox: '++localId, id, type, createdAt, synced',
+        meta: 'key',
+      })
       .upgrade(async (tx) => {
         await tx
           .table('products')
@@ -69,6 +110,38 @@ export class LaxmiDB extends Dexie {
           .modify((s: Record<string, unknown>) => {
             if (!s.pricingSettings) s.pricingSettings = DEFAULT_PRICING_SETTINGS
             else s.pricingSettings = normalizePricingSettings(s.pricingSettings as never)
+          })
+      })
+    this.version(3)
+      .stores({ ...STORE_SCHEMA })
+      .upgrade(async (tx) => {
+        const catsTable = tx.table('categories')
+        const existing = await catsTable.count()
+        const now = new Date().toISOString()
+        if (existing === 0) {
+          // Copy pricing from store if available
+          const store = (await tx.table('store').get('store-1')) as StoreProfile | undefined
+          const ps = normalizePricingSettings(store?.pricingSettings)
+          const seeds = defaultSeedCategories(now).map((c) => {
+            const rules = ps[c.baseType] || c
+            return {
+              ...c,
+              wholesaleMarkupPct: rules.wholesaleMarkupPct,
+              mrpMarkupPct: rules.mrpMarkupPct,
+              saleDiscountFromMrpPct: rules.saleDiscountFromMrpPct,
+            }
+          })
+          await catsTable.bulkPut(seeds)
+        }
+        await tx
+          .table('products')
+          .toCollection()
+          .modify((p: Record<string, unknown>) => {
+            if (!p.categoryId) {
+              p.categoryId = defaultCategoryIdForType((p.type as ProductType) || 'garment')
+            }
+            const n = normalizeProductPrices(p)
+            Object.assign(p, n)
           })
       })
   }
@@ -89,7 +162,8 @@ export async function productsWithSizes() {
   }
   return products.map((p) => {
     const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
-    return { ...n, sizes: byP.get(p.id) || [] } as Product
+    const categoryId = p.categoryId || defaultCategoryIdForType(p.type)
+    return { ...n, categoryId, sizes: byP.get(p.id) || [] } as Product
   })
 }
 
@@ -98,12 +172,66 @@ export async function getPricingSettings() {
   return normalizePricingSettings(store?.pricingSettings)
 }
 
+export async function getActiveCategories() {
+  await ensureLocalCategories()
+  const all = await db.categories.toArray()
+  return all
+    .filter((c) => c.active !== false && !c.deletedAt)
+    .map(normalizeCategory)
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+}
+
+export async function getAllCategories() {
+  await ensureLocalCategories()
+  const all = await db.categories.toArray()
+  return all
+    .filter((c) => !c.deletedAt)
+    .map(normalizeCategory)
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+}
+
+export async function getCategoryById(id: string | undefined | null) {
+  if (!id) return undefined
+  await ensureLocalCategories()
+  const c = await db.categories.get(id)
+  return c ? normalizeCategory(c) : undefined
+}
+
+/** Rules for a product: prefer its category, else type-level store settings. */
+export async function getRulesForProduct(product: {
+  categoryId?: string
+  type: ProductType
+}): Promise<CategoryPricingRules> {
+  if (product.categoryId) {
+    const cat = await getCategoryById(product.categoryId)
+    if (cat) return rulesFromCategory(cat)
+  }
+  const settings = await getPricingSettings()
+  return settings[product.type] || settings.garment
+}
+
+async function ensureLocalCategories() {
+  const n = await db.categories.count()
+  if (n > 0) return
+  const now = new Date().toISOString()
+  const store = await db.store.get('store-1')
+  const ps = normalizePricingSettings(store?.pricingSettings)
+  const seeds = defaultSeedCategories(now).map((c) => ({
+    ...c,
+    wholesaleMarkupPct: ps[c.baseType].wholesaleMarkupPct,
+    mrpMarkupPct: ps[c.baseType].mrpMarkupPct,
+    saleDiscountFromMrpPct: ps[c.baseType].saleDiscountFromMrpPct,
+  }))
+  await db.categories.bulkPut(seeds)
+}
+
 export async function applySnapshot(snap: Snapshot) {
   await db.transaction(
     'rw',
     [
       db.store,
       db.users,
+      db.categories,
       db.products,
       db.productSizes,
       db.suppliers,
@@ -126,13 +254,20 @@ export async function applySnapshot(snap: Snapshot) {
         const existing = await db.users.get(u.id)
         await db.users.put({ ...existing, ...u })
       }
+      await db.categories.clear()
+      const cats = (snap.categories || []).map((c) => normalizeCategory(c))
+      if (cats.length) await db.categories.bulkPut(cats)
+      else await db.categories.bulkPut(defaultSeedCategories())
+
       await db.products.clear()
       await db.productSizes.clear()
       for (const p of snap.products) {
         const { sizes, ...rest } = normalizeProductPrices(p as unknown as Record<string, unknown>) as Product & {
           sizes?: ProductSize[]
         }
-        await db.products.put(rest)
+        const categoryId =
+          rest.categoryId || defaultCategoryIdForType((rest.type as ProductType) || 'garment')
+        await db.products.put({ ...rest, categoryId })
         if (sizes?.length) await db.productSizes.bulkPut(sizes)
       }
       await db.suppliers.clear()
@@ -157,6 +292,7 @@ export async function applySnapshot(snap: Snapshot) {
 export async function seedLocalIfEmpty() {
   const { seedCatalogIfEmpty } = await import('./seedCatalog')
   await seedCatalogIfEmpty()
+  await ensureLocalCategories()
   const count = await db.users.count()
   if (count > 0) return
   const { passwordHash } = await import('./lib/ids')

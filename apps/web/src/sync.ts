@@ -64,6 +64,7 @@ export async function flushOutbox() {
   state = { ...state, syncing: true }
   emit()
   const body: Record<string, unknown> = {
+    categories: [],
     products: [],
     suppliers: [],
     purchases: [],
@@ -86,7 +87,9 @@ export async function flushOutbox() {
             ? 'returns'
             : item.type === 'product'
               ? 'products'
-              : 'suppliers'
+              : item.type === 'category'
+                ? 'categories'
+                : 'suppliers'
     if (!body[key]) body[key] = []
     ;(body[key] as unknown[]).push(item.payload)
   }

@@ -4,7 +4,7 @@ import { Printer, Search, Trash2, X } from 'lucide-react'
 import { useAuth } from '../auth'
 import { ReceiptView, printReceipt } from '../components/Receipt'
 import { SizeChips } from '../components/SizeChips'
-import { db, enqueue, productsWithSizes } from '../db'
+import { db, enqueue, getActiveCategories, productsWithSizes } from '../db'
 import { inr, qtyLabel, stockQtyOfLine, typeLabel } from '../lib/format'
 import { nextBillNo, uid } from '../lib/ids'
 import { flushOutbox } from '../sync'
@@ -35,9 +35,11 @@ function availableStock(p: Product, size?: string) {
 export function POS() {
   const { user } = useAuth()
   const products = useLiveQuery(() => productsWithSizes(), []) || []
+  const categories = useLiveQuery(() => getActiveCategories(), []) || []
   const sales = useLiveQuery(() => db.sales.toArray(), []) || []
   const store = useLiveQuery(() => db.store.get('store-1'), []) as StoreProfile | undefined
   const [q, setQ] = useState('')
+  const [catFilter, setCatFilter] = useState<'all' | string>('all')
   const [cart, setCart] = useState<CartLine[]>([])
   const [discount, setDiscount] = useState('')
   const [phone, setPhone] = useState('')
@@ -57,10 +59,17 @@ export function POS() {
     const s = q.trim().toLowerCase()
     return products.filter((p) => {
       if (p.deletedAt) return false
+      if (catFilter !== 'all' && p.categoryId !== catFilter) return false
       if (!s) return true
-      return p.name.toLowerCase().includes(s) || p.sku.toLowerCase().includes(s) || p.type.includes(s)
+      const catName = categories.find((c) => c.id === p.categoryId)?.name?.toLowerCase() || ''
+      return (
+        p.name.toLowerCase().includes(s) ||
+        p.sku.toLowerCase().includes(s) ||
+        p.type.includes(s) ||
+        catName.includes(s)
+      )
     })
-  }, [products, q])
+  }, [products, q, catFilter, categories])
 
   const sub = cart.reduce((a, l) => a + l.lineTotal, 0)
   const disc = Number(discount) || 0
@@ -235,9 +244,32 @@ export function POS() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search name, SKU, type…"
+            placeholder="Search name, SKU, category…"
             className="min-h-[48px] w-full rounded-xl border border-brand-200 bg-white pl-10 pr-3"
           />
+        </div>
+        <div className="mb-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setCatFilter('all')}
+            className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
+              catFilter === 'all' ? 'bg-brand-700 text-white' : 'border bg-white text-brand-800'
+            }`}
+          >
+            All
+          </button>
+          {categories.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => setCatFilter(c.id)}
+              className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
+                catFilter === c.id ? 'bg-brand-700 text-white' : 'border bg-white text-brand-800'
+              }`}
+            >
+              {c.name}
+            </button>
+          ))}
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
           {filtered.map((p) => {
@@ -256,7 +288,7 @@ export function POS() {
                   <div>
                     <div className="font-semibold text-brand-900">{p.name}</div>
                     <div className="text-xs text-slate-500">
-                      {p.sku} · {typeLabel(p.type)}
+                      {p.sku} · {categories.find((c) => c.id === p.categoryId)?.name || typeLabel(p.type)}
                     </div>
                   </div>
                   <div className="text-right">
