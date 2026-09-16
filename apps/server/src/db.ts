@@ -5,9 +5,9 @@ import Database from 'better-sqlite3'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 export const dataDir = path.join(__dirname, '..', 'data')
-fs.mkdirSync(dataDir, { recursive: true })
 
 const dbPath = process.env.LAXMI_DB || path.join(dataDir, 'laxmi.db')
+fs.mkdirSync(path.dirname(dbPath), { recursive: true })
 export const db = new Database(dbPath)
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')

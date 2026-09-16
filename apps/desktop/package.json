@@ -1,0 +1,83 @@
+{
+  "name": "@laxmi/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Laxmi Fashion Wholesale Mart \u2014 Windows desktop (Electron)",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist:win": "electron-builder --win portable --x64",
+    "dist:win:nsis": "electron-builder --win nsis --x64",
+    "dist:win:all": "electron-builder --win portable nsis --x64"
+  },
+  "build": {
+    "appId": "com.laxmifashion.wholesale",
+    "productName": "Laxmi Fashion Wholesale Mart",
+    "copyright": "Copyright \u00a9 Laxmi Fashion Wholesale Mart",
+    "directories": {
+      "output": "release-build",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web-dist"
+      },
+      {
+        "from": "../server/dist",
+        "to": "server"
+      },
+      {
+        "from": "server-runtime/node_modules",
+        "to": "server/node_modules",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "server-runtime/package.json",
+        "to": "server/package.json"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "LaxmiFashion-Portable.${ext}",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "artifactName": "LaxmiFashion-Setup.${ext}",
+      "shortcutName": "Laxmi Fashion Wholesale Mart"
+    },
+    "portable": {
+      "artifactName": "LaxmiFashion-Portable.${ext}"
+    },
+    "npmRebuild": false,
+    "electronLanguages": [
+      "en-US"
+    ]
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "author": "Laxmi Fashion Wholesale Mart"
+}

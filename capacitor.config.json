@@ -1,0 +1,11 @@
+{
+  "appId": "com.laxmifashion.wholesale",
+  "appName": "Laxmi Fashion Wholesale Mart",
+  "webDir": "apps/web/dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

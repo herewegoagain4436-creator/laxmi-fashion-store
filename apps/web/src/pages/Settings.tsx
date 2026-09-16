@@ -11,6 +11,7 @@ import {
   slugify,
 } from '../lib/pricing'
 import { flushOutbox, syncNow } from '../sync'
+import { getApiBase, setApiBase } from '../api'
 import { SyncBadge } from '../components/SyncBadge'
 import { inr } from '../lib/format'
 import { uid } from '../lib/ids'
@@ -37,6 +38,8 @@ export function Settings() {
   const [address, setAddress] = useState('')
   const [phone, setPhone] = useState('')
   const [city, setCity] = useState('')
+  const [apiBase, setApiBaseState] = useState('')
+  const [apiSaved, setApiSaved] = useState(false)
   const [samplePurchase, setSamplePurchase] = useState('100')
   const [saved, setSaved] = useState(false)
   const [catMsg, setCatMsg] = useState('')
@@ -64,6 +67,16 @@ export function Settings() {
     setPhone(store.phone)
     setCity(store.city)
   }, [store])
+
+  useEffect(() => {
+    setApiBaseState(getApiBase())
+  }, [])
+
+  function saveApiBase() {
+    setApiBase(apiBase)
+    setApiSaved(true)
+    setTimeout(() => setApiSaved(false), 1500)
+  }
 
   const sample = Number(samplePurchase) || 0
 
@@ -249,6 +262,31 @@ export function Settings() {
       <button type="button" className="mb-6 min-h-[48px] w-full rounded-xl bg-brand-600 font-semibold text-white" onClick={() => void saveProfile()}>
         {saved ? 'Saved' : 'Save profile'}
       </button>
+
+      <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
+        <h2 className="mb-1 text-lg font-bold text-brand-800">Sync server (phones / Android)</h2>
+        <p className="mb-3 text-xs text-slate-600">
+          Optional. Leave empty for offline-only on this device (IndexedDB). To sync with the shop PC, enter the PC
+          address like <code className="rounded bg-slate-100 px-1">http://192.168.1.10:8787</code> (same Wi‑Fi). Desktop
+          app uses the built-in local server automatically.
+        </p>
+        <label className="mb-3 block text-sm">
+          API server URL
+          <input
+            className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+            placeholder="http://192.168.x.x:8787"
+            value={apiBase}
+            onChange={(e) => setApiBaseState(e.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          className="min-h-[44px] w-full rounded-xl border border-brand-600 font-semibold text-brand-700"
+          onClick={saveApiBase}
+        >
+          {apiSaved ? 'Saved' : 'Save sync server'}
+        </button>
+      </section>
 
       <section className="mb-4 rounded-2xl border border-brand-100 bg-cream/50 p-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

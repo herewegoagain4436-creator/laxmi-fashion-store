@@ -597,16 +597,51 @@ app.get('/api/reports/today', auth, (req: Authed, res) => {
   res.json({ count, total, cash, upi, card, date: iso.slice(0, 10) })
 })
 
-const webDist = path.join(__dirname, '..', '..', 'web', 'dist')
-if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist))
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api')) return next()
-    res.sendFile(path.join(webDist, 'index.html'))
-  })
+function mountWebStatic() {
+  const webDist =
+    process.env.LAXMI_WEB_DIST || path.join(__dirname, '..', '..', 'web', 'dist')
+  if (fs.existsSync(webDist)) {
+    app.use(express.static(webDist))
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next()
+      res.sendFile(path.join(webDist, 'index.html'))
+    })
+  }
+  return webDist
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Laxmi Fashion server http://0.0.0.0:${PORT}`)
-  if (seeded) console.log('Seeded owner/owner123 and cashier/cashier123')
-})
+export type StartServerOptions = {
+  port?: number
+  host?: string
+}
+
+export async function startServer(options: StartServerOptions = {}) {
+  const port = options.port ?? PORT
+  const host = options.host ?? process.env.HOST ?? '0.0.0.0'
+  const webDist = mountWebStatic()
+  await new Promise<void>((resolve, reject) => {
+    const server = app.listen(port, host, () => {
+      console.log(`Laxmi Fashion server http://${host}:${port}`)
+      if (webDist && fs.existsSync(webDist)) console.log(`Serving UI from ${webDist}`)
+      if (seeded) console.log('Seeded owner/owner123 and cashier/cashier123')
+      resolve()
+    })
+    server.on('error', reject)
+  })
+  return { port, host }
+}
+
+const isDirectRun = (() => {
+  try {
+    return process.argv[1] != null && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  } catch {
+    return false
+  }
+})()
+
+if (isDirectRun) {
+  startServer().catch((err) => {
+    console.error(err)
+    process.exit(1)
+  })
+}

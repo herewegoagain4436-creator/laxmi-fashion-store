@@ -12,3 +12,20 @@ apps/server/data/*.db-*
 coverage
 
 *.tsbuildinfo
+# Desktop / Android packaging
+apps/desktop/release-build/
+apps/desktop/server-runtime/node_modules/
+apps/desktop/server-runtime/package-lock.json
+apps/server/dist/
+release/*.exe
+release/*.apk
+release/*.zip
+*.keystore
+local.properties
+# Android build outputs (project itself is committed)
+android/.gradle/
+android/app/build/
+android/build/
+android/captures/
+android/local.properties
+android/.idea/

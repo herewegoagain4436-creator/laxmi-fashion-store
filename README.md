@@ -77,3 +77,18 @@ SQLite file: `apps/server/data/laxmi.db` (gitignored). Delete it to re-seed.
 apps/web      PWA client
 apps/server   Express + SQLite API
 ```
+
+## Desktop (Windows) & Android
+
+See [PACKAGING.md](./PACKAGING.md) for full details.
+
+```bash
+# Windows portable .exe → release/LaxmiFashion-Portable.exe
+npm run dist:win
+
+# Android debug APK → release/LaxmiFashion.apk
+npm run dist:android
+```
+
+- **Windows:** double-click `LaxmiFashion-Portable.exe`. Data in AppData. Login `owner` / `owner123`.
+- **Android:** install `LaxmiFashion.apk` (debug build; allow unknown sources). Offline-first; set sync server URL in Settings to reach the shop PC.
