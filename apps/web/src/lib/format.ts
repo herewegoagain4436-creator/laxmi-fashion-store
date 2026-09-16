@@ -10,7 +10,7 @@ export function inr(n: number) {
 export function qtyLabel(qty: number, unit: string) {
   const q = Number(qty)
   const pretty = Number.isInteger(q) ? String(q) : q.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
-  if (unit === 'metre' || unit === 'm') return `${pretty} m`
+  if (unit === 'metre' || unit === 'm' || unit === 'MTR') return `${pretty} m`
   if (unit === 'cm') return `${pretty} cm`
   return pretty
 }

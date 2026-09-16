@@ -9,7 +9,8 @@ import { uid } from '../lib/ids'
 import { computePricesFromPurchase, defaultCategoryIdForType, normalizeProductPrices } from '../lib/pricing'
 import { flushOutbox } from '../sync'
 import type { Category, Product, ProductSize, ProductType } from '../types'
-import { STANDARD_SIZES } from '../types'
+import { DEFAULT_COLOUR, STANDARD_SIZES } from '../types'
+import { buildMatrix, normalizeColour, variantKey } from '../lib/variants'
 
 const emptyForm = (defaultCatId: string, baseType: ProductType) => ({
   name: '',
@@ -23,6 +24,8 @@ const emptyForm = (defaultCatId: string, baseType: ProductType) => ({
   quantity: '',
   lowStockThreshold: '5',
   fabricSellUnit: 'metre' as 'metre' | 'cm',
+  colours: DEFAULT_COLOUR,
+  shade: '',
   sizes: STANDARD_SIZES.map((s) => ({ size: s, qty: s === 'Free size' ? '' : '' })),
   customSize: '',
 })
@@ -81,7 +84,12 @@ export function Inventory() {
       const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
       setEditId(p.id)
       const sq: Record<string, string> = {}
-      for (const s of p.sizes || []) sq[s.size] = String(s.quantity)
+      const cols = new Set<string>()
+      for (const s of p.sizes || []) {
+        const c = normalizeColour(s.colour)
+        cols.add(c)
+        sq[variantKey(c, s.size)] = String(s.quantity)
+      }
       setSizeQtys(sq)
       const catId = p.categoryId || defaultCategoryIdForType(p.type)
       const cat = catById.get(catId)
@@ -97,13 +105,15 @@ export function Inventory() {
         quantity: String(p.quantity),
         lowStockThreshold: String(p.lowStockThreshold),
         fabricSellUnit: (p.fabricSellUnit as 'metre' | 'cm') || 'metre',
+        colours: [...cols].join(', ') || DEFAULT_COLOUR,
+        shade: p.shade || '',
         sizes: [],
         customSize: '',
       })
     } else {
       setEditId(null)
       const sq: Record<string, string> = {}
-      for (const s of STANDARD_SIZES) sq[s] = ''
+      for (const s of STANDARD_SIZES) sq[variantKey(DEFAULT_COLOUR, s)] = ''
       setSizeQtys(sq)
       const first = categories[0]
       const catId = first?.id || defaultCategoryIdForType('garment')
@@ -170,22 +180,36 @@ export function Inventory() {
     }
     const t = new Date().toISOString()
     const id = editId || uid()
+    const sku = form.sku.trim() || `SKU-${id.slice(0, 8)}`
     let sizes: ProductSize[] = []
     if (form.type === 'garment') {
-      sizes = Object.entries(sizeQtys)
-        .filter(([k]) => k.trim())
-        .map(([size, qty]) => ({
-          id: `${id}-${size}`,
-          productId: id,
-          size,
-          quantity: Number(qty) || 0,
-        }))
+      const colourList = form.colours
+        .split(',')
+        .map((c) => normalizeColour(c))
+        .filter(Boolean)
+      const uniqCols = [...new Set(colourList.length ? colourList : [DEFAULT_COLOUR])]
+      const sizeNames = [
+        ...new Set(
+          Object.keys(sizeQtys)
+            .map((k) => (k.includes('::') ? k.split('::')[1] : k))
+            .filter(Boolean),
+        ),
+      ]
+      const szList = sizeNames.length ? sizeNames : [...STANDARD_SIZES]
+      const qtyMap: Record<string, number> = {}
+      for (const [k, v] of Object.entries(sizeQtys)) {
+        if (k.includes('::')) qtyMap[k] = Number(v) || 0
+        else {
+          for (const c of uniqCols) qtyMap[variantKey(c, k)] = Number(v) || 0
+        }
+      }
+      sizes = buildMatrix(id, sku, uniqCols, szList, qtyMap)
     }
     const purchase = Number(form.purchasePrice) || 0
     const sale = Number(form.salePrice) || 0
     const product: Product = {
       id,
-      sku: form.sku.trim() || `SKU-${id.slice(0, 8)}`,
+      sku,
       name: form.name.trim(),
       type: form.type,
       categoryId: form.categoryId,
@@ -199,6 +223,7 @@ export function Inventory() {
       quantity: form.type === 'garment' ? 0 : Number(form.quantity) || 0,
       lowStockThreshold: Number(form.lowStockThreshold) || 0,
       fabricSellUnit: form.type === 'fabric' ? form.fabricSellUnit : null,
+      shade: form.type === 'fabric' ? form.shade || null : null,
       createdAt: t,
       updatedAt: t,
     }
@@ -301,11 +326,18 @@ export function Inventory() {
                     <div className="text-xs text-slate-500">{p.sku}</div>
                     {p.type === 'garment' && (
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {(p.sizes || []).filter((s) => s.quantity > 0).map((s) => (
-                          <span key={s.size} className="rounded bg-cream px-1.5 text-[11px]">
-                            {s.size}:{s.quantity}
-                          </span>
-                        ))}
+                        {(p.sizes || [])
+                          .filter((s) => s.quantity > 0)
+                          .map((s) => (
+                            <span
+                              key={`${s.colour}-${s.size}`}
+                              className="rounded bg-cream px-1.5 text-[11px]"
+                              title={s.barcode || ''}
+                            >
+                              {s.colour && s.colour !== DEFAULT_COLOUR ? `${s.colour}/` : ''}
+                              {s.size}:{s.quantity}
+                            </span>
+                          ))}
                       </div>
                     )}
                   </td>
@@ -319,7 +351,7 @@ export function Inventory() {
                     </span>
                     {low && <span className="ml-2 rounded bg-amber-100 px-1.5 text-[11px]">LOW</span>}
                   </td>
-                  <td className="px-3 py-2">{inr(n.purchasePrice)}</td>
+                  <td className="px-3 py-2">{owner ? inr(n.purchasePrice) : '—'}</td>
                   <td className="px-3 py-2">{inr(n.wholesalePrice)}</td>
                   <td className="px-3 py-2">{inr(n.mrp)}</td>
                   <td className="px-3 py-2 font-semibold">{inr(n.salePrice)}</td>
@@ -459,27 +491,97 @@ export function Inventory() {
                 value={form.lowStockThreshold}
                 onChange={(e) => setForm({ ...form, lowStockThreshold: e.target.value })}
               />
+              {form.type === 'fabric' && (
+                <input
+                  className="lf-input"
+                  placeholder="Default shade (optional)"
+                  value={form.shade}
+                  onChange={(e) => setForm({ ...form, shade: e.target.value })}
+                />
+              )}
               {form.type === 'garment' && (
                 <div>
-                  <div className="mb-2 text-sm font-medium">Stock per size</div>
+                  <label className="mb-2 block text-sm font-medium">
+                    Colours (comma-separated)
+                    <input
+                      className="lf-input mt-1"
+                      value={form.colours}
+                      placeholder="Default, Navy, Red"
+                      onChange={(e) => {
+                        const colours = e.target.value
+                        setForm({ ...form, colours })
+                        const cols = colours
+                          .split(',')
+                          .map((c) => normalizeColour(c))
+                          .filter(Boolean)
+                        const uniq = [...new Set(cols.length ? cols : [DEFAULT_COLOUR])]
+                        const sizeNames = [
+                          ...new Set(
+                            Object.keys(sizeQtys)
+                              .map((k) => (k.includes('::') ? k.split('::')[1] : k))
+                              .filter(Boolean),
+                          ),
+                        ]
+                        const szs = sizeNames.length ? sizeNames : [...STANDARD_SIZES]
+                        setSizeQtys((prev) => {
+                          const next: Record<string, string> = {}
+                          for (const c of uniq) {
+                            for (const sz of szs) {
+                              const k = variantKey(c, sz)
+                              next[k] =
+                                prev[k] ??
+                                prev[sz] ??
+                                prev[variantKey(DEFAULT_COLOUR, sz)] ??
+                                ''
+                            }
+                          }
+                          return next
+                        })
+                      }}
+                    />
+                  </label>
+                  <div className="mb-2 text-sm font-medium">Stock per colour × size</div>
                   <SizeChips
-                    sizes={Object.keys(sizeQtys).map((s) => ({ size: s, quantity: Number(sizeQtys[s]) || 0 }))}
+                    sizes={[
+                      ...new Set(
+                        Object.keys(sizeQtys).map((k) => (k.includes('::') ? k.split('::')[1] : k)),
+                      ),
+                    ].map((s) => ({ size: s, quantity: 0 }))}
                     value=""
-                    onChange={(sz) => setSizeQtys((p) => ({ ...p, [sz]: p[sz] || '0' }))}
-                    showStock
+                    onChange={(sz) => {
+                      const cols = form.colours
+                        .split(',')
+                        .map((c) => normalizeColour(c))
+                        .filter(Boolean)
+                      const uniq = [...new Set(cols.length ? cols : [DEFAULT_COLOUR])]
+                      setSizeQtys((p) => {
+                        const next = { ...p }
+                        for (const c of uniq) {
+                          const k = variantKey(c, sz)
+                          if (!(k in next)) next[k] = '0'
+                        }
+                        return next
+                      })
+                    }}
+                    showStock={false}
                   />
-                  <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {Object.keys(sizeQtys).map((sz) => (
-                      <label key={sz} className="text-xs">
-                        {sz}
-                        <input
-                          className="mt-1 min-h-[40px] w-full rounded-lg border px-2"
-                          value={sizeQtys[sz]}
-                          onChange={(e) => setSizeQtys((p) => ({ ...p, [sz]: e.target.value }))}
-                        />
-                      </label>
-                    ))}
+                  <div className="mt-2 max-h-48 space-y-1 overflow-auto">
+                    {Object.keys(sizeQtys)
+                      .sort()
+                      .map((key) => (
+                        <label key={key} className="flex items-center gap-2 text-xs">
+                          <span className="w-28 shrink-0 font-medium">{key.replace('::', ' / ')}</span>
+                          <input
+                            className="min-h-[36px] flex-1 rounded-lg border px-2"
+                            value={sizeQtys[key]}
+                            onChange={(e) => setSizeQtys((p) => ({ ...p, [key]: e.target.value }))}
+                          />
+                        </label>
+                      ))}
                   </div>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Barcodes are auto-generated per colour × size on save.
+                  </p>
                 </div>
               )}
             </div>

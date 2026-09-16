@@ -8,9 +8,12 @@ import {
   normalizePricingSettings,
   rulesFromCategory,
 } from './lib/pricing'
+import { makeVariantBarcode, makeVariantId, normalizeColour, normalizeVariant } from './lib/variants'
+import { normalizeGstSettings } from './lib/gst'
 import type {
   Category,
   CategoryPricingRules,
+  HeldBill,
   OutboxItem,
   Product,
   ProductSize,
@@ -22,15 +25,17 @@ import type {
   Sale,
   SaleItem,
   Snapshot,
+  StockLedgerEntry,
   StoreProfile,
   User,
 } from './types'
+import { DEFAULT_COLOUR, DEFAULT_GST_SETTINGS } from './types'
 
 export type LocalUser = User & { passwordHash?: string }
 
 export type Meta = { key: string; value: string }
 
-const STORE_SCHEMA = {
+const STORE_SCHEMA_V3 = {
   users: 'id, username, role',
   store: 'id',
   categories: 'id, baseType, name, sortOrder, active, deletedAt',
@@ -45,6 +50,13 @@ const STORE_SCHEMA = {
   returnItems: 'id, returnId, saleItemId',
   outbox: '++localId, id, type, createdAt, synced',
   meta: 'key',
+} as const
+
+const STORE_SCHEMA = {
+  ...STORE_SCHEMA_V3,
+  productSizes: 'id, productId, colour, barcode, [productId+colour+size]',
+  heldBills: 'id, createdAt, cashierId',
+  stockLedger: 'id, productId, createdAt, refId, reason',
 } as const
 
 export class LaxmiDB extends Dexie {
@@ -62,6 +74,8 @@ export class LaxmiDB extends Dexie {
   returnItems!: Table<ReturnItem, string>
   outbox!: Table<OutboxItem, number>
   meta!: Table<Meta, string>
+  heldBills!: Table<HeldBill, string>
+  stockLedger!: Table<StockLedgerEntry, string>
 
   constructor() {
     super('laxmi-fashion-v1')
@@ -113,13 +127,12 @@ export class LaxmiDB extends Dexie {
           })
       })
     this.version(3)
-      .stores({ ...STORE_SCHEMA })
+      .stores({ ...STORE_SCHEMA_V3 })
       .upgrade(async (tx) => {
         const catsTable = tx.table('categories')
         const existing = await catsTable.count()
         const now = new Date().toISOString()
         if (existing === 0) {
-          // Copy pricing from store if available
           const store = (await tx.table('store').get('store-1')) as StoreProfile | undefined
           const ps = normalizePricingSettings(store?.pricingSettings)
           const seeds = defaultSeedCategories(now).map((c) => {
@@ -144,6 +157,44 @@ export class LaxmiDB extends Dexie {
             Object.assign(p, n)
           })
       })
+    this.version(4)
+      .stores({ ...STORE_SCHEMA })
+      .upgrade(async (tx) => {
+        const products = await tx.table('products').toArray()
+        const skuById = new Map<string, string>()
+        for (const p of products as Product[]) skuById.set(p.id, p.sku || p.id)
+        await tx
+          .table('productSizes')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            const colour = normalizeColour(row.colour as string)
+            const size = String(row.size || 'Free size')
+            const productId = String(row.productId)
+            row.colour = colour
+            if (!row.barcode) {
+              row.barcode = makeVariantBarcode(skuById.get(productId) || productId, colour, size)
+            }
+            if (!row.variantSku) {
+              row.variantSku = `${skuById.get(productId) || productId}-${colour.slice(0, 4)}-${size}`.toUpperCase()
+            }
+            // Keep id stable if possible; rewrite if old size-only id
+            if (!String(row.id).includes(colour) && colour !== DEFAULT_COLOUR) {
+              row.id = makeVariantId(productId, colour, size)
+            } else if (!row.id) {
+              row.id = makeVariantId(productId, colour, size)
+            }
+          })
+        await tx
+          .table('store')
+          .toCollection()
+          .modify((s: Record<string, unknown>) => {
+            if (!s.gstSettings) s.gstSettings = DEFAULT_GST_SETTINGS
+            else s.gstSettings = normalizeGstSettings(s.gstSettings as never)
+            if (s.maxCashierDiscount == null) s.maxCashierDiscount = 100
+            if (s.maxCashierDiscountPct == null) s.maxCashierDiscountPct = 5
+            if (s.upiVpa == null) s.upiVpa = ''
+          })
+      })
   }
 }
 
@@ -163,7 +214,10 @@ export async function productsWithSizes() {
   return products.map((p) => {
     const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
     const categoryId = p.categoryId || defaultCategoryIdForType(p.type)
-    return { ...n, categoryId, sizes: byP.get(p.id) || [] } as Product
+    const sizes = (byP.get(p.id) || []).map((sz) =>
+      normalizeVariant({ ...sz, productId: p.id, size: sz.size || 'Free size' }),
+    )
+    return { ...n, categoryId, sizes } as Product
   })
 }
 
@@ -242,12 +296,19 @@ export async function applySnapshot(snap: Snapshot) {
       db.returns,
       db.returnItems,
       db.meta,
+      db.heldBills,
+      db.stockLedger,
     ],
     async () => {
       if (snap.store) {
         await db.store.put({
           ...snap.store,
           pricingSettings: normalizePricingSettings(snap.store.pricingSettings),
+          gstSettings: normalizeGstSettings(snap.store.gstSettings),
+          maxCashierDiscount: snap.store.maxCashierDiscount ?? 100,
+          maxCashierDiscountPct: snap.store.maxCashierDiscountPct ?? 5,
+          upiVpa: snap.store.upiVpa || '',
+          gstin: snap.store.gstin || '',
         })
       }
       for (const u of snap.users) {
@@ -268,7 +329,18 @@ export async function applySnapshot(snap: Snapshot) {
         const categoryId =
           rest.categoryId || defaultCategoryIdForType((rest.type as ProductType) || 'garment')
         await db.products.put({ ...rest, categoryId })
-        if (sizes?.length) await db.productSizes.bulkPut(sizes)
+        if (sizes?.length) {
+          await db.productSizes.bulkPut(
+            sizes.map((sz) =>
+              normalizeVariant({
+                ...sz,
+                productId: rest.id,
+                size: sz.size || (rest.type === 'garment' ? 'Free size' : 'Free size'),
+                colour: sz.colour,
+              }),
+            ),
+          )
+        }
       }
       await db.suppliers.clear()
       if (snap.suppliers.length) await db.suppliers.bulkPut(snap.suppliers)
@@ -321,7 +393,70 @@ export async function seedLocalIfEmpty() {
     city: 'Surat',
     updatedAt: t,
     pricingSettings: DEFAULT_PRICING_SETTINGS,
+    gstSettings: DEFAULT_GST_SETTINGS,
+    upiVpa: '',
+    gstin: '',
+    maxCashierDiscount: 100,
+    maxCashierDiscountPct: 5,
   })
+}
+
+/** Apply local stock delta for a variant (colour×size) or product qty. Writes ledger. */
+export async function applyLocalStockDelta(opts: {
+  productId: string
+  productType: ProductType
+  colour?: string | null
+  size?: string | null
+  unit: string
+  quantity: number
+  direction: 1 | -1
+  reason: StockLedgerEntry['reason']
+  refType: string
+  refId: string
+}) {
+  const deltaBase = opts.unit === 'cm' ? opts.quantity / 100 : opts.quantity
+  const delta = opts.direction * deltaBase
+  const t = new Date().toISOString()
+  const colour = normalizeColour(opts.colour)
+  const size = opts.size || ''
+  if (opts.productType === 'garment' && size) {
+    let row = await db.productSizes.where({ productId: opts.productId }).filter((r) => normalizeColour(r.colour) === colour && r.size === size).first()
+    if (!row) {
+      // fallback size-only legacy
+      row = await db.productSizes.where({ productId: opts.productId, size }).first()
+    }
+    if (row) {
+      await db.productSizes.update(row.id, { quantity: Number(row.quantity) + delta })
+    } else {
+      const id = makeVariantId(opts.productId, colour, size)
+      await db.productSizes.put({
+        id,
+        productId: opts.productId,
+        colour,
+        size,
+        quantity: Math.max(0, delta),
+        barcode: null,
+        variantSku: null,
+      })
+    }
+  } else {
+    const p = await db.products.get(opts.productId)
+    if (p) await db.products.update(opts.productId, { quantity: Number(p.quantity) + delta, updatedAt: t })
+  }
+  const ledger: StockLedgerEntry = {
+    id: crypto.randomUUID(),
+    productId: opts.productId,
+    colour,
+    size,
+    delta,
+    unit: opts.unit,
+    reason: opts.reason,
+    refType: opts.refType,
+    refId: opts.refId,
+    createdAt: t,
+  }
+  await db.stockLedger.put(ledger)
+  return ledger
 }
 
 export async function enqueue(type: OutboxItem['type'], payload: unknown, id?: string) {

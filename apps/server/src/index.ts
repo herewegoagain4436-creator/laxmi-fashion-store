@@ -255,17 +255,22 @@ function upsertCategory(c: Record<string, unknown>) {
 
 function upsertProduct(p: Record<string, unknown>) {
   const id = String(p.id)
-  const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(id)
+  const existing = db.prepare('SELECT id, quantity FROM products WHERE id = ?').get(id) as
+    | { id: string; quantity: number }
+    | undefined
   const t = String(p.updatedAt || nowIso())
   const { cost, sale, wholesale, mrp } = resolveProductPrices(p)
   const categoryId = resolveCategoryId(p)
   const type = resolveTypeFromCategory(categoryId, String(p.type || 'garment'))
+  // Never last-write-wins stock qty from product sync — keep server qty on update.
+  const keepQty = existing ? Number(existing.quantity) : Number(p.quantity ?? 0)
   if (existing) {
     db.prepare(
       `UPDATE products SET sku=@sku, name=@name, type=@type, category_id=@category_id, unit=@unit,
         selling_price=@selling_price, cost_price=@cost_price,
-        wholesale_price=@wholesale_price, mrp=@mrp, quantity=@quantity,
+        wholesale_price=@wholesale_price, mrp=@mrp,
         low_stock_threshold=@low_stock_threshold, fabric_sell_unit=@fabric_sell_unit,
+        shade=@shade,
         updated_at=@updated_at, deleted_at=@deleted_at WHERE id=@id`,
     ).run({
       id,
@@ -278,21 +283,20 @@ function upsertProduct(p: Record<string, unknown>) {
       cost_price: cost,
       wholesale_price: wholesale,
       mrp,
-      quantity: p.quantity ?? 0,
       low_stock_threshold: p.lowStockThreshold ?? 5,
       fabric_sell_unit: p.fabricSellUnit ?? null,
+      shade: p.shade ?? null,
       updated_at: t,
       deleted_at: p.deletedAt ?? null,
     })
-    db.prepare('DELETE FROM product_sizes WHERE product_id = ?').run(id)
   } else {
     db.prepare(
       `INSERT INTO products (id, sku, name, type, category_id, unit, selling_price, cost_price,
         wholesale_price, mrp, quantity,
-        low_stock_threshold, fabric_sell_unit, created_at, updated_at, deleted_at)
+        low_stock_threshold, fabric_sell_unit, shade, created_at, updated_at, deleted_at)
        VALUES (@id, @sku, @name, @type, @category_id, @unit, @selling_price, @cost_price,
         @wholesale_price, @mrp, @quantity,
-        @low_stock_threshold, @fabric_sell_unit, @created_at, @updated_at, @deleted_at)`,
+        @low_stock_threshold, @fabric_sell_unit, @shade, @created_at, @updated_at, @deleted_at)`,
     ).run({
       id,
       sku: p.sku,
@@ -304,20 +308,50 @@ function upsertProduct(p: Record<string, unknown>) {
       cost_price: cost,
       wholesale_price: wholesale,
       mrp,
-      quantity: p.quantity ?? 0,
+      quantity: keepQty,
       low_stock_threshold: p.lowStockThreshold ?? 5,
       fabric_sell_unit: p.fabricSellUnit ?? null,
+      shade: p.shade ?? null,
       created_at: p.createdAt || t,
       updated_at: t,
       deleted_at: p.deletedAt ?? null,
     })
   }
-  const sizes = (p.sizes as Array<{ id?: string; size: string; quantity: number }>) || []
-  const ins = db.prepare(
-    'INSERT INTO product_sizes (id, product_id, size, quantity) VALUES (?, ?, ?, ?)',
-  )
+  const sizes =
+    (p.sizes as Array<{
+      id?: string
+      size: string
+      colour?: string
+      quantity?: number
+      barcode?: string
+      variantSku?: string
+    }>) || []
   for (const s of sizes) {
-    ins.run(s.id || `${id}-${s.size}`, id, s.size, s.quantity ?? 0)
+    const colour = (s.colour && String(s.colour).trim()) || 'Default'
+    const size = String(s.size)
+    const vid = s.id || `${id}-${colour}-${size}`
+    const existingSz = db
+      .prepare('SELECT id, quantity FROM product_sizes WHERE id = ?')
+      .get(vid) as { id: string; quantity: number } | undefined
+    const legacy = !existingSz
+      ? (db
+          .prepare('SELECT id, quantity FROM product_sizes WHERE product_id = ? AND size = ? AND (colour IS NULL OR colour = ? OR colour = \'Default\')')
+          .get(id, size, colour) as { id: string; quantity: number } | undefined)
+      : undefined
+    const row = existingSz || legacy
+    if (row) {
+      // Preserve quantity — only update metadata (barcode / colour / sku)
+      db.prepare(
+        `UPDATE product_sizes SET colour = ?, barcode = COALESCE(?, barcode),
+          variant_sku = COALESCE(?, variant_sku) WHERE id = ?`,
+      ).run(colour, s.barcode ?? null, s.variantSku ?? null, row.id)
+    } else {
+      // New variant: allow initial qty from payload (first create)
+      db.prepare(
+        `INSERT INTO product_sizes (id, product_id, size, colour, quantity, barcode, variant_sku)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(vid, id, size, colour, s.quantity ?? 0, s.barcode ?? null, s.variantSku ?? null)
+    }
   }
 }
 
@@ -358,8 +392,8 @@ function createPurchase(p: Record<string, unknown>) {
       p.createdAt || nowIso(),
     )
     const ins = db.prepare(
-      `INSERT INTO purchase_items (id, purchase_id, product_id, product_name, size, quantity, unit, unit_cost, line_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO purchase_items (id, purchase_id, product_id, product_name, size, colour, quantity, unit, unit_cost, line_total)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     const latestCost = new Map<string, number>()
     for (const it of items) {
@@ -369,6 +403,7 @@ function createPurchase(p: Record<string, unknown>) {
         it.productId,
         it.productName ?? '',
         it.size ?? null,
+        (it.colour as string) || 'Default',
         it.quantity,
         it.unit ?? 'piece',
         it.unitCost,
@@ -388,6 +423,8 @@ function createPurchase(p: Record<string, unknown>) {
           String(it.unit || (prod.type === 'fabric' ? 'metre' : 'piece')),
           Number(it.quantity),
           1,
+          (it.colour as string) || 'Default',
+          { reason: 'purchase', refType: 'purchase', refId: id },
         )
       }
     }
@@ -447,8 +484,9 @@ function createSale(s: Record<string, unknown>) {
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO sales (id, bill_no, datetime, cashier_id, cashier_name, customer_phone,
-        payment_mode, cash_amount, upi_amount, card_amount, discount, grand_total, status, notes, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        payment_mode, cash_amount, upi_amount, card_amount, discount, grand_total, status, notes, created_at,
+        price_channel, customer_gstin, upi_ref, taxable_total, gst_total, exchange_of_sale_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       s.billNo,
@@ -465,12 +503,21 @@ function createSale(s: Record<string, unknown>) {
       s.status || 'completed',
       s.notes ?? '',
       s.createdAt || nowIso(),
+      s.priceChannel || 'retail',
+      s.customerGstin ?? '',
+      s.upiRef ?? '',
+      s.taxableTotal ?? 0,
+      s.gstTotal ?? 0,
+      s.exchangeOfSaleId ?? null,
     )
     const ins = db.prepare(
-      `INSERT INTO sale_items (id, sale_id, product_id, product_name, product_type, sku, size, quantity, unit, rate, line_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO sale_items (id, sale_id, product_id, product_name, product_type, sku, size, quantity, unit, rate, line_total,
+        colour, shade, barcode, mrp, gst_rate, taxable_amount, cgst_amount, sgst_amount, line_kind, return_of_sale_item_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     for (const it of items) {
+      const lineKind = String(it.lineKind || 'sale')
+      const qty = Number(it.quantity)
       ins.run(
         it.id || crypto.randomUUID(),
         id,
@@ -479,19 +526,36 @@ function createSale(s: Record<string, unknown>) {
         it.productType,
         it.sku ?? '',
         it.size ?? null,
-        it.quantity,
+        qty,
         it.unit,
         it.rate,
         it.lineTotal,
+        (it.colour as string) || 'Default',
+        it.shade ?? null,
+        it.barcode ?? null,
+        it.mrp ?? null,
+        it.gstRate ?? null,
+        it.taxableAmount ?? null,
+        it.cgstAmount ?? null,
+        it.sgstAmount ?? null,
+        lineKind,
+        it.returnOfSaleItemId ?? null,
       )
+      // Return lines restock; sale lines deplete
+      const dir: 1 | -1 = lineKind === 'return' ? 1 : -1
       applyStockDelta(
         String(it.productId),
         String(it.productType),
         (it.size as string) || null,
         String(it.unit),
-        Number(it.quantity),
-        -1,
+        Math.abs(qty),
+        dir,
+        (it.colour as string) || 'Default',
+        { reason: lineKind === 'return' ? 'return' : 'sale', refType: 'sale', refId: id },
       )
+    }
+    if (s.exchangeOfSaleId) {
+      db.prepare('UPDATE sales SET status = ? WHERE id = ?').run('partial_return', String(s.exchangeOfSaleId))
     }
   })
   tx()
@@ -518,8 +582,8 @@ function createReturn(r: Record<string, unknown>) {
       r.createdAt || nowIso(),
     )
     const ins = db.prepare(
-      `INSERT INTO return_items (id, return_id, sale_item_id, product_id, product_name, size, quantity, unit)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO return_items (id, return_id, sale_item_id, product_id, product_name, size, colour, quantity, unit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     for (const it of items) {
       ins.run(
@@ -529,12 +593,13 @@ function createReturn(r: Record<string, unknown>) {
         it.productId,
         it.productName ?? '',
         it.size ?? null,
+        (it.colour as string) || 'Default',
         it.quantity,
         it.unit ?? 'piece',
       )
       const saleItem = db
-        .prepare('SELECT product_type FROM sale_items WHERE id = ?')
-        .get(it.saleItemId as string) as { product_type: string } | undefined
+        .prepare('SELECT product_type, colour FROM sale_items WHERE id = ?')
+        .get(it.saleItemId as string) as { product_type: string; colour?: string } | undefined
       const type =
         (it.productType as string) ||
         saleItem?.product_type ||
@@ -548,6 +613,8 @@ function createReturn(r: Record<string, unknown>) {
         String(it.unit || 'piece'),
         Number(it.quantity),
         1,
+        (it.colour as string) || saleItem?.colour || 'Default',
+        { reason: 'return', refType: 'return', refId: id },
       )
     }
     const saleId = String(r.saleId)
@@ -599,13 +666,20 @@ app.post('/api/sync', auth, (req: Authed, res) => {
       if (body.store && req.user?.role === 'owner') {
         const st = body.store
         db.prepare(
-          'UPDATE store_profile SET name=?, address=?, phone=?, city=?, pricing_settings=?, updated_at=? WHERE id=?',
+          `UPDATE store_profile SET name=?, address=?, phone=?, city=?, pricing_settings=?,
+            upi_vpa=?, gstin=?, gst_settings=?, max_cashier_discount=?, max_cashier_discount_pct=?,
+            updated_at=? WHERE id=?`,
         ).run(
           st.name,
           st.address ?? '',
           st.phone ?? '',
           st.city ?? '',
           st.pricingSettings != null ? JSON.stringify(st.pricingSettings) : null,
+          st.upiVpa ?? '',
+          st.gstin ?? '',
+          st.gstSettings != null ? JSON.stringify(st.gstSettings) : null,
+          st.maxCashierDiscount ?? 100,
+          st.maxCashierDiscountPct ?? 5,
           st.updatedAt || nowIso(),
           st.id || 'store-1',
         )

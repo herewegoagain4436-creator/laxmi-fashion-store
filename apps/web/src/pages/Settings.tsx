@@ -27,6 +27,7 @@ import { SyncBadge } from '../components/SyncBadge'
 import { inr } from '../lib/format'
 import { uid } from '../lib/ids'
 import type { Category, CategoryPricingRules, ProductType } from '../types'
+import { normalizeGstSettings } from '../lib/gst'
 import {
   checkGitHubRelease,
   clearWebUpdateToken,
@@ -59,6 +60,14 @@ export function Settings() {
   const [address, setAddress] = useState('')
   const [phone, setPhone] = useState('')
   const [city, setCity] = useState('')
+  const [upiVpa, setUpiVpa] = useState('')
+  const [gstin, setGstin] = useState('')
+  const [apparelThreshold, setApparelThreshold] = useState('2500')
+  const [apparelLow, setApparelLow] = useState('5')
+  const [apparelHigh, setApparelHigh] = useState('18')
+  const [fabricRate, setFabricRate] = useState('5')
+  const [maxCashierDiscount, setMaxCashierDiscount] = useState('100')
+  const [maxCashierDiscountPct, setMaxCashierDiscountPct] = useState('5')
   const [syncMode, setSyncModeState] = useState<SyncMode>('offline')
   const [lanUrl, setLanUrl] = useState('')
   const [cloudUrl, setCloudUrlState] = useState('')
@@ -105,6 +114,15 @@ export function Settings() {
     setAddress(store.address)
     setPhone(store.phone)
     setCity(store.city)
+    setUpiVpa(store.upiVpa || '')
+    setGstin(store.gstin || '')
+    const g = normalizeGstSettings(store.gstSettings)
+    setApparelThreshold(String(g.apparelThreshold))
+    setApparelLow(String(g.apparelLowRate))
+    setApparelHigh(String(g.apparelHighRate))
+    setFabricRate(String(g.fabricRate))
+    setMaxCashierDiscount(String(store.maxCashierDiscount ?? 100))
+    setMaxCashierDiscountPct(String(store.maxCashierDiscountPct ?? 5))
   }, [store])
 
   useEffect(() => {
@@ -263,6 +281,16 @@ export function Settings() {
       city,
       updatedAt: new Date().toISOString(),
       pricingSettings: store?.pricingSettings,
+      upiVpa: upiVpa.trim(),
+      gstin: gstin.trim().toUpperCase(),
+      gstSettings: normalizeGstSettings({
+        apparelThreshold: Number(apparelThreshold) || 2500,
+        apparelLowRate: Number(apparelLow) || 5,
+        apparelHighRate: Number(apparelHigh) || 18,
+        fabricRate: Number(fabricRate) || 5,
+      }),
+      maxCashierDiscount: Number(maxCashierDiscount) || 0,
+      maxCashierDiscountPct: Number(maxCashierDiscountPct) || 0,
     }
     await db.store.put(rec)
     await enqueue('store', rec, rec.id)
@@ -423,6 +451,58 @@ export function Settings() {
         <span className="lf-label">Phone</span>
         <input className="lf-input" value={phone} onChange={(e) => setPhone(e.target.value)} />
       </label>
+      <label className="block">
+        <span className="lf-label">UPI ID (VPA) for payment QR</span>
+        <input
+          className="lf-input font-mono"
+          value={upiVpa}
+          onChange={(e) => setUpiVpa(e.target.value)}
+          placeholder="shop@upi"
+        />
+      </label>
+      <label className="block">
+        <span className="lf-label">Shop GSTIN (optional, reports)</span>
+        <input
+          className="lf-input font-mono uppercase"
+          value={gstin}
+          onChange={(e) => setGstin(e.target.value.toUpperCase())}
+          placeholder="22AAAAA0000A1Z5"
+        />
+      </label>
+      <div className="rounded-xl border border-brand-100 bg-cream-50 p-3">
+        <div className="mb-2 text-sm font-semibold text-brand-800">GST rates (Notification 9/2025)</div>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-xs">
+            Apparel threshold (₹ pre-GST)
+            <input className="lf-input mt-1" value={apparelThreshold} onChange={(e) => setApparelThreshold(e.target.value)} />
+          </label>
+          <label className="text-xs">
+            Fabric flat %
+            <input className="lf-input mt-1" value={fabricRate} onChange={(e) => setFabricRate(e.target.value)} />
+          </label>
+          <label className="text-xs">
+            Apparel ≤ threshold %
+            <input className="lf-input mt-1" value={apparelLow} onChange={(e) => setApparelLow(e.target.value)} />
+          </label>
+          <label className="text-xs">
+            Apparel above %
+            <input className="lf-input mt-1" value={apparelHigh} onChange={(e) => setApparelHigh(e.target.value)} />
+          </label>
+        </div>
+        <p className="mt-2 text-[11px] text-slate-500">
+          Defaults: ₹2,500 → 5% / above → 18%. Customer receipts stay GST-inclusive (no tax lines).
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="text-xs">
+          Cashier max discount ₹
+          <input className="lf-input mt-1" value={maxCashierDiscount} onChange={(e) => setMaxCashierDiscount(e.target.value)} />
+        </label>
+        <label className="text-xs">
+          Cashier max discount %
+          <input className="lf-input mt-1" value={maxCashierDiscountPct} onChange={(e) => setMaxCashierDiscountPct(e.target.value)} />
+        </label>
+      </div>
       <button type="button" className="lf-btn-primary w-full min-h-[48px]" onClick={() => void saveProfile()}>
         {saved ? 'Saved' : 'Save profile'}
       </button>

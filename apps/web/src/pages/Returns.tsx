@@ -55,6 +55,7 @@ export function Returns() {
       productId: p.saleItem.productId,
       productName: p.saleItem.productName,
       size: p.saleItem.size,
+      colour: p.saleItem.colour || 'Default',
       quantity: p.quantity,
       unit: p.saleItem.unit,
       productType: p.saleItem.productType,
@@ -77,7 +78,13 @@ export function Returns() {
         for (const it of recItems) {
           const delta = stockQtyOfLine(it.unit, it.quantity)
           if (it.productType === 'garment' && it.size) {
-            const row = await db.productSizes.where({ productId: it.productId, size: it.size }).first()
+            const colour = (it.colour || 'Default').trim() || 'Default'
+            let row = await db.productSizes
+              .where('productId')
+              .equals(it.productId)
+              .filter((r) => (r.colour || 'Default') === colour && r.size === it.size)
+              .first()
+            if (!row) row = await db.productSizes.where({ productId: it.productId, size: it.size! }).first()
             if (row) await db.productSizes.update(row.id, { quantity: Number(row.quantity) + delta })
           } else {
             const p = await db.products.get(it.productId)
@@ -160,7 +167,9 @@ export function Returns() {
                 return (
                   <div key={it.id} className="mb-2 rounded-lg bg-cream p-2 text-sm">
                     <div className="font-medium">
-                      {it.productName} {it.size ? `(${it.size})` : ''}
+                      {it.productName}{' '}
+                      {it.colour && it.colour !== 'Default' ? it.colour : ''}{' '}
+                      {it.size ? `(${it.size})` : ''}
                     </div>
                     <div className="text-xs text-slate-500">
                       Sold {qtyLabel(it.quantity, it.unit)} · remaining {qtyLabel(remain, it.unit)}

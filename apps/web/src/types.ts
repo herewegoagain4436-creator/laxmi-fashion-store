@@ -2,7 +2,9 @@ export type Role = 'owner' | 'cashier'
 /** Stock behaviour base type (sizes / piece / metre). */
 export type ProductType = 'garment' | 'saree' | 'fabric'
 export type PaymentMode = 'cash' | 'upi' | 'card' | 'split'
-export type SaleStatus = 'completed' | 'returned' | 'partial_return'
+export type SaleStatus = 'completed' | 'returned' | 'partial_return' | 'held'
+export type PriceChannel = 'retail' | 'wholesale'
+export type SaleLineKind = 'sale' | 'return'
 
 export type User = {
   id: string
@@ -44,6 +46,15 @@ export type Category = {
   deletedAt?: string | null
 }
 
+/** Apparel GST slab + fabric flat rate (Notification 9/2025 defaults). */
+export type GstSettings = {
+  /** Pre-GST taxable value threshold per piece for apparel (default 2500). */
+  apparelThreshold: number
+  apparelLowRate: number
+  apparelHighRate: number
+  fabricRate: number
+}
+
 export type StoreProfile = {
   id: string
   name: string
@@ -53,13 +64,28 @@ export type StoreProfile = {
   updatedAt: string
   /** @deprecated Prefer Category pricing fields */
   pricingSettings?: PricingSettings
+  /** UPI VPA / UPI ID shown on amount-specific QR */
+  upiVpa?: string
+  /** Shop GSTIN (optional; used on owner tax reports) */
+  gstin?: string
+  gstSettings?: GstSettings
+  /** Max ₹ discount a cashier may apply on a bill (0 = none without owner). */
+  maxCashierDiscount?: number
+  /** Max % of subtotal a cashier may discount. */
+  maxCashierDiscountPct?: number
 }
 
+/** Colour × size stock row (variant). colour defaults to "Default" for migrated stock. */
 export type ProductSize = {
   id: string
   productId: string
   size: string
+  colour: string
   quantity: number
+  /** Variant barcode (unique per colour×size). */
+  barcode?: string | null
+  /** Optional variant SKU suffix / code. */
+  variantSku?: string | null
 }
 
 /**
@@ -91,6 +117,8 @@ export type Product = {
   quantity: number
   lowStockThreshold: number
   fabricSellUnit: 'metre' | 'cm' | null
+  /** Optional default shade for fabric/than */
+  shade?: string | null
   createdAt: string
   updatedAt: string
   deletedAt?: string | null
@@ -114,6 +142,7 @@ export type PurchaseItem = {
   productId: string
   productName: string
   size?: string | null
+  colour?: string | null
   quantity: number
   unit: string
   unitCost: number
@@ -139,10 +168,22 @@ export type SaleItem = {
   productType: ProductType
   sku: string
   size?: string | null
+  colour?: string | null
+  shade?: string | null
+  barcode?: string | null
   quantity: number
   unit: string
   rate: number
   lineTotal: number
+  mrp?: number
+  /** GST rate applied after discount (5 or 18 typically). */
+  gstRate?: number
+  taxableAmount?: number
+  cgstAmount?: number
+  sgstAmount?: number
+  lineKind?: SaleLineKind
+  /** When lineKind=return, original sale item id if known. */
+  returnOfSaleItemId?: string | null
 }
 
 export type Sale = {
@@ -152,6 +193,7 @@ export type Sale = {
   cashierId: string
   cashierName: string
   customerPhone: string
+  customerGstin?: string
   paymentMode: PaymentMode
   cashAmount: number
   upiAmount: number
@@ -161,6 +203,12 @@ export type Sale = {
   status: SaleStatus
   notes: string
   createdAt: string
+  priceChannel?: PriceChannel
+  upiRef?: string
+  taxableTotal?: number
+  gstTotal?: number
+  /** Original bill id when this sale includes exchange returns. */
+  exchangeOfSaleId?: string | null
 }
 
 export type ReturnRecord = {
@@ -181,15 +229,39 @@ export type ReturnItem = {
   productId: string
   productName: string
   size?: string | null
+  colour?: string | null
   quantity: number
   unit: string
   productType?: ProductType
 }
 
+/** Append-only stock movement (sync-safe; avoids LWW on qty). */
+export type StockLedgerEntry = {
+  id: string
+  productId: string
+  colour: string
+  size: string
+  delta: number
+  unit: string
+  reason: 'sale' | 'return' | 'purchase' | 'adjust' | 'seed'
+  refType: string
+  refId: string
+  createdAt: string
+  deviceId?: string
+}
+
+export type HeldBill = {
+  id: string
+  label: string
+  payload: unknown
+  createdAt: string
+  cashierId?: string
+}
+
 export type OutboxItem = {
   localId?: number
   id: string
-  type: 'product' | 'supplier' | 'purchase' | 'sale' | 'return' | 'store' | 'category'
+  type: 'product' | 'supplier' | 'purchase' | 'sale' | 'return' | 'store' | 'category' | 'stock_ledger'
   payload: unknown
   createdAt: string
   synced: number
@@ -213,6 +285,16 @@ export type Snapshot = {
 }
 
 export const STANDARD_SIZES = ['S', 'M', 'L', 'XL', 'XXL', 'Free size'] as const
+
+/** Migrated / unspecified colour axis value. */
+export const DEFAULT_COLOUR = 'Default'
+
+export const DEFAULT_GST_SETTINGS: GstSettings = {
+  apparelThreshold: 2500,
+  apparelLowRate: 5,
+  apparelHighRate: 18,
+  fabricRate: 5,
+}
 
 /** Stable IDs for the three default seed categories. */
 export const DEFAULT_CATEGORY_IDS = {

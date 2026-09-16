@@ -115,7 +115,7 @@ export function seedIfEmpty() {
     }
   }
   const insertSize = db.prepare(
-    'INSERT INTO product_sizes (id, product_id, size, quantity) VALUES (?, ?, ?, ?)',
+    'INSERT INTO product_sizes (id, product_id, size, colour, quantity, barcode, variant_sku) VALUES (?, ?, ?, ?, ?, ?, ?)',
   )
 
   const garments: Array<{
@@ -184,11 +184,17 @@ export function seedIfEmpty() {
       updated_at: t,
     })
     for (const [size, qty] of Object.entries(g.sizes)) {
-      insertSize.run(`${g.id}-${size}`, g.id, size, qty)
+      const colour = 'Default'
+      const barcode = `${g.sku.replace(/[^A-Za-z0-9]/g, '')}-DEF-${size}`.toUpperCase()
+      insertSize.run(`${g.id}-${colour}-${size}`, g.id, size, colour, qty, barcode, `${g.sku}-DEF-${size}`.toUpperCase())
     }
     if (g.id !== 'p-nightwear' && g.id !== 'p-frock') {
       for (const s of STANDARD) {
-        if (g.sizes[s] == null) insertSize.run(`${g.id}-${s}`, g.id, s, 0)
+        if (g.sizes[s] == null) {
+          const colour = 'Default'
+          const barcode = `${g.sku.replace(/[^A-Za-z0-9]/g, '')}-DEF-${s}`.toUpperCase()
+          insertSize.run(`${g.id}-${colour}-${s}`, g.id, s, colour, 0, barcode, `${g.sku}-DEF-${s}`.toUpperCase())
+        }
       }
     }
   }

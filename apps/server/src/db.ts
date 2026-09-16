@@ -192,6 +192,7 @@ export function migrate() {
   `)
   ensureFourPriceColumns()
   ensureCategories()
+  ensureV12Columns()
 }
 
 function tableColumns(table: string): Set<string> {
@@ -347,23 +348,49 @@ export function applyStockDelta(
   unit: string,
   quantity: number,
   direction: 1 | -1,
+  colour: string | null | undefined = 'Default',
+  meta?: { reason?: string; refType?: string; refId?: string },
 ) {
   const delta = direction * stockQtyFromLine(unit, quantity)
+  const col = (colour && String(colour).trim()) || 'Default'
   if (productType === 'garment' && size) {
-    const row = db
-      .prepare('SELECT id, quantity FROM product_sizes WHERE product_id = ? AND size = ?')
-      .get(productId, size) as { id: string; quantity: number } | undefined
+    let row = db
+      .prepare('SELECT id, quantity FROM product_sizes WHERE product_id = ? AND colour = ? AND size = ?')
+      .get(productId, col, size) as { id: string; quantity: number } | undefined
+    if (!row) {
+      row = db
+        .prepare('SELECT id, quantity FROM product_sizes WHERE product_id = ? AND size = ?')
+        .get(productId, size) as { id: string; quantity: number } | undefined
+    }
     if (row) {
       db.prepare('UPDATE product_sizes SET quantity = quantity + ? WHERE id = ?').run(delta, row.id)
     } else if (delta !== 0) {
       db.prepare(
-        'INSERT INTO product_sizes (id, product_id, size, quantity) VALUES (?, ?, ?, ?)',
-      ).run(`${productId}-${size}`, productId, size, Math.max(0, delta))
+        'INSERT INTO product_sizes (id, product_id, size, colour, quantity) VALUES (?, ?, ?, ?, ?)',
+      ).run(`${productId}-${col}-${size}`, productId, size, col, Math.max(0, delta))
     }
   } else {
     db.prepare(
       'UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ?',
     ).run(delta, nowIso(), productId)
+  }
+  if (meta?.refId) {
+    db.prepare(
+      `INSERT OR IGNORE INTO stock_ledger
+        (id, product_id, colour, size, delta, unit, reason, ref_type, ref_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      meta.refId + ':' + productId + ':' + col + ':' + (size || '') + ':' + String(delta),
+      productId,
+      col,
+      size || '',
+      delta,
+      unit,
+      meta.reason || 'adjust',
+      meta.refType || '',
+      meta.refId,
+      nowIso(),
+    )
   }
 }
 
@@ -387,9 +414,19 @@ export function rowCategory(r: Record<string, unknown>) {
 export function rowProduct(r: Record<string, unknown>) {
   const sizes = db
     .prepare(
-      'SELECT id, product_id as productId, size, quantity FROM product_sizes WHERE product_id = ? ORDER BY size',
+      `SELECT id, product_id as productId, size, quantity,
+              COALESCE(colour, 'Default') as colour, barcode, variant_sku as variantSku
+       FROM product_sizes WHERE product_id = ? ORDER BY colour, size`,
     )
-    .all(r.id) as Array<{ id: string; productId: string; size: string; quantity: number }>
+    .all(r.id) as Array<{
+      id: string
+      productId: string
+      size: string
+      quantity: number
+      colour: string
+      barcode: string | null
+      variantSku: string | null
+    }>
   const cost = Number(r.cost_price) || 0
   const sale = Number(r.selling_price) || 0
   const wholesale =
@@ -426,6 +463,7 @@ export function rowProduct(r: Record<string, unknown>) {
     quantity: r.quantity,
     lowStockThreshold: r.low_stock_threshold,
     fabricSellUnit: r.fabric_sell_unit,
+    shade: r.shade ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     deletedAt: r.deleted_at,
@@ -460,7 +498,8 @@ export function getSnapshot() {
   const purchaseItems = db
     .prepare(
       `SELECT id, purchase_id as purchaseId, product_id as productId, product_name as productName,
-              size, quantity, unit, unit_cost as unitCost, line_total as lineTotal
+              size, COALESCE(colour, 'Default') as colour, quantity, unit,
+              unit_cost as unitCost, line_total as lineTotal
        FROM purchase_items`,
     )
     .all()
@@ -469,14 +508,23 @@ export function getSnapshot() {
       `SELECT id, bill_no as billNo, datetime, cashier_id as cashierId, cashier_name as cashierName,
               customer_phone as customerPhone, payment_mode as paymentMode,
               cash_amount as cashAmount, upi_amount as upiAmount, card_amount as cardAmount,
-              discount, grand_total as grandTotal, status, notes, created_at as createdAt
+              discount, grand_total as grandTotal, status, notes, created_at as createdAt,
+              COALESCE(price_channel, 'retail') as priceChannel,
+              customer_gstin as customerGstin, upi_ref as upiRef,
+              COALESCE(taxable_total, 0) as taxableTotal, COALESCE(gst_total, 0) as gstTotal,
+              exchange_of_sale_id as exchangeOfSaleId
        FROM sales ORDER BY datetime DESC`,
     )
     .all()
   const saleItems = db
     .prepare(
       `SELECT id, sale_id as saleId, product_id as productId, product_name as productName,
-              product_type as productType, sku, size, quantity, unit, rate, line_total as lineTotal
+              product_type as productType, sku, size, quantity, unit, rate, line_total as lineTotal,
+              COALESCE(colour, 'Default') as colour, shade, barcode, mrp,
+              gst_rate as gstRate, taxable_amount as taxableAmount,
+              cgst_amount as cgstAmount, sgst_amount as sgstAmount,
+              COALESCE(line_kind, 'sale') as lineKind,
+              return_of_sale_item_id as returnOfSaleItemId
        FROM sale_items`,
     )
     .all()
@@ -490,7 +538,8 @@ export function getSnapshot() {
   const returnItems = db
     .prepare(
       `SELECT id, return_id as returnId, sale_item_id as saleItemId, product_id as productId,
-              product_name as productName, size, quantity, unit
+              product_name as productName, size, COALESCE(colour, 'Default') as colour,
+              quantity, unit
        FROM return_items`,
     )
     .all()
@@ -527,4 +576,97 @@ export function getSnapshot() {
     returnItems,
     serverTime: nowIso(),
   }
+}
+
+/** Colour / barcode / GST / UPI / ledger columns for v1.2. */
+export function ensureV12Columns() {
+  const addCol = (table: string, col: string, ddl: string) => {
+    const cols = tableColumns(table)
+    if (!cols.has(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+  }
+
+  addCol('product_sizes', 'colour', "colour TEXT NOT NULL DEFAULT 'Default'")
+  addCol('product_sizes', 'barcode', 'barcode TEXT')
+  addCol('product_sizes', 'variant_sku', 'variant_sku TEXT')
+
+  // Rebuild uniqueness is hard in SQLite; keep old UNIQUE(product_id,size) and rely on id PK.
+  // Backfill colour
+  db.exec(`UPDATE product_sizes SET colour = 'Default' WHERE colour IS NULL OR colour = ''`)
+
+  // Generate barcodes where missing
+  const rows = db
+    .prepare(
+      `SELECT ps.id, ps.product_id, ps.size, ps.colour, ps.barcode, p.sku
+       FROM product_sizes ps JOIN products p ON p.id = ps.product_id
+       WHERE ps.barcode IS NULL OR ps.barcode = ''`,
+    )
+    .all() as Array<{ id: string; product_id: string; size: string; colour: string; sku: string }>
+  const updBc = db.prepare('UPDATE product_sizes SET barcode = ?, variant_sku = ? WHERE id = ?')
+  for (const r of rows) {
+    const sku = String(r.sku || 'SKU').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 12)
+    const c = String(r.colour || 'Default').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'DEF'
+    const s = String(r.size || 'FS').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6)
+    const barcode = `${sku}-${c}-${s}`
+    const variantSku = `${r.sku}-${String(r.colour || 'Default').slice(0, 4)}-${r.size}`.toUpperCase()
+    updBc.run(barcode, variantSku, r.id)
+  }
+
+  addCol('products', 'shade', 'shade TEXT')
+
+  addCol('purchase_items', 'colour', "colour TEXT DEFAULT 'Default'")
+
+  addCol('sales', 'price_channel', "price_channel TEXT DEFAULT 'retail'")
+  addCol('sales', 'customer_gstin', 'customer_gstin TEXT')
+  addCol('sales', 'upi_ref', 'upi_ref TEXT')
+  addCol('sales', 'taxable_total', 'taxable_total REAL DEFAULT 0')
+  addCol('sales', 'gst_total', 'gst_total REAL DEFAULT 0')
+  addCol('sales', 'exchange_of_sale_id', 'exchange_of_sale_id TEXT')
+
+  addCol('sale_items', 'colour', "colour TEXT DEFAULT 'Default'")
+  addCol('sale_items', 'shade', 'shade TEXT')
+  addCol('sale_items', 'barcode', 'barcode TEXT')
+  addCol('sale_items', 'mrp', 'mrp REAL')
+  addCol('sale_items', 'gst_rate', 'gst_rate REAL')
+  addCol('sale_items', 'taxable_amount', 'taxable_amount REAL')
+  addCol('sale_items', 'cgst_amount', 'cgst_amount REAL')
+  addCol('sale_items', 'sgst_amount', 'sgst_amount REAL')
+  addCol('sale_items', 'line_kind', "line_kind TEXT DEFAULT 'sale'")
+  addCol('sale_items', 'return_of_sale_item_id', 'return_of_sale_item_id TEXT')
+
+  addCol('return_items', 'colour', "colour TEXT DEFAULT 'Default'")
+
+  addCol('store_profile', 'upi_vpa', 'upi_vpa TEXT')
+  addCol('store_profile', 'gstin', 'gstin TEXT')
+  addCol('store_profile', 'gst_settings', 'gst_settings TEXT')
+  addCol('store_profile', 'max_cashier_discount', 'max_cashier_discount REAL DEFAULT 100')
+  addCol('store_profile', 'max_cashier_discount_pct', 'max_cashier_discount_pct REAL DEFAULT 5')
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stock_ledger (
+      id TEXT PRIMARY KEY,
+      product_id TEXT NOT NULL,
+      colour TEXT NOT NULL DEFAULT 'Default',
+      size TEXT NOT NULL DEFAULT '',
+      delta REAL NOT NULL,
+      unit TEXT,
+      reason TEXT NOT NULL,
+      ref_type TEXT,
+      ref_id TEXT,
+      created_at TEXT NOT NULL,
+      device_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ledger_product ON stock_ledger(product_id);
+    CREATE INDEX IF NOT EXISTS idx_ledger_ref ON stock_ledger(ref_id);
+    CREATE INDEX IF NOT EXISTS idx_sizes_barcode ON product_sizes(barcode);
+  `)
+
+  const defaultGst = JSON.stringify({
+    apparelThreshold: 2500,
+    apparelLowRate: 5,
+    apparelHighRate: 18,
+    fabricRate: 5,
+  })
+  db.prepare(
+    `UPDATE store_profile SET gst_settings = ? WHERE gst_settings IS NULL OR gst_settings = ''`,
+  ).run(defaultGst)
 }

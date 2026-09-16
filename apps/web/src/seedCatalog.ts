@@ -7,6 +7,8 @@ import {
   round2,
 } from './lib/pricing'
 import type { Product, ProductSize, Supplier } from './types'
+import { DEFAULT_COLOUR } from './types'
+import { makeVariantBarcode } from './lib/variants'
 
 function withFourPrices(cost: number, sale: number, type: Product['type']): Pick<
   Product,
@@ -61,7 +63,16 @@ export async function seedCatalogIfEmpty() {
       updatedAt: t,
     })
     for (const [size, quantity] of Object.entries(sizeMap)) {
-      sizes.push({ id: `${id}-${size}`, productId: id, size, quantity })
+      const colour = DEFAULT_COLOUR
+      sizes.push({
+        id: `${id}-${colour}-${size}`,
+        productId: id,
+        size,
+        colour,
+        quantity,
+        barcode: makeVariantBarcode(sku, colour, size),
+        variantSku: `${sku}-DEF-${size}`.toUpperCase(),
+      })
     }
   }
 

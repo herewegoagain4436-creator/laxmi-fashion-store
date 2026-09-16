@@ -1,5 +1,5 @@
 import { inr, qtyLabel, fmtDateTime } from '../lib/format'
-import type { Sale, SaleItem, StoreProfile } from '../types'
+import { DEFAULT_COLOUR, type Sale, type SaleItem, type StoreProfile } from '../types'
 
 export function ReceiptView({
   store,
@@ -44,6 +44,18 @@ export function ReceiptView({
           <span>{sale.customerPhone}</span>
         </div>
       )}
+      {sale.priceChannel === 'wholesale' && (
+        <div className="flex justify-between">
+          <span>Channel</span>
+          <span>WHOLESALE</span>
+        </div>
+      )}
+      {sale.customerGstin && (
+        <div className="flex justify-between">
+          <span>GSTIN</span>
+          <span>{sale.customerGstin}</span>
+        </div>
+      )}
       <div className="my-2 border-t border-dashed border-black" />
       <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 font-bold">
         <span>Item</span>
@@ -51,17 +63,28 @@ export function ReceiptView({
         <span>Rate</span>
         <span>Amt</span>
       </div>
-      {items.map((it) => (
-        <div key={it.id} className="mt-1 grid grid-cols-[1fr_auto_auto_auto] gap-x-2">
-          <div>
-            <div>{it.productName}</div>
-            {it.size ? <div className="text-[11px]">Size: {it.size}</div> : null}
+      {items.map((it) => {
+        const isRet = (it.lineKind || 'sale') === 'return' || it.lineTotal < 0
+        return (
+          <div key={it.id} className="mt-1 grid grid-cols-[1fr_auto_auto_auto] gap-x-2">
+            <div>
+              <div>
+                {isRet ? 'RET ' : ''}
+                {it.productName}
+              </div>
+              <div className="text-[11px]">
+                {it.colour && it.colour !== DEFAULT_COLOUR ? `${it.colour} ` : ''}
+                {it.size ? `Size: ${it.size}` : ''}
+                {it.shade ? ` Shade: ${it.shade}` : ''}
+                {it.mrp != null && it.mrp > 0 ? ` MRP:${it.mrp}` : ''}
+              </div>
+            </div>
+            <span>{qtyLabel(Math.abs(it.quantity), it.unit)}</span>
+            <span>{it.rate}</span>
+            <span className="text-right">{it.lineTotal}</span>
           </div>
-          <span>{qtyLabel(it.quantity, it.unit)}</span>
-          <span>{it.rate}</span>
-          <span className="text-right">{it.lineTotal}</span>
-        </div>
-      ))}
+        )
+      })}
       <div className="my-2 border-t border-dashed border-black" />
       {sale.discount > 0 && (
         <div className="flex justify-between">
@@ -73,6 +96,7 @@ export function ReceiptView({
         <span>TOTAL</span>
         <span>{inr(sale.grandTotal)}</span>
       </div>
+      {/* Customer receipt: no GST break-up lines (inclusive display policy). Tax stored for reports. */}
       <div className="mt-1 flex justify-between uppercase">
         <span>Payment</span>
         <span>{sale.paymentMode}</span>
@@ -82,6 +106,12 @@ export function ReceiptView({
           {sale.cashAmount > 0 && <div>Cash {inr(sale.cashAmount)}</div>}
           {sale.upiAmount > 0 && <div>UPI {inr(sale.upiAmount)}</div>}
           {sale.cardAmount > 0 && <div>Card {inr(sale.cardAmount)}</div>}
+        </div>
+      )}
+      {sale.upiRef && (
+        <div className="flex justify-between text-[12px]">
+          <span>UPI Ref</span>
+          <span>{sale.upiRef}</span>
         </div>
       )}
       <div className="my-2 border-t border-dashed border-black" />

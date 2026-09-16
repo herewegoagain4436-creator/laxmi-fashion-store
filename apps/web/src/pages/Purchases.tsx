@@ -13,7 +13,8 @@ import {
 } from '../lib/pricing'
 import { flushOutbox } from '../sync'
 import type { Category, Product, ProductSize, ProductType } from '../types'
-import { STANDARD_SIZES } from '../types'
+import { DEFAULT_COLOUR, STANDARD_SIZES } from '../types'
+import { makeVariantBarcode, makeVariantId, normalizeColour } from '../lib/variants'
 
 type Line = {
   key: string
@@ -21,6 +22,7 @@ type Line = {
   productName: string
   type: string
   size?: string
+  colour?: string
   quantity: number
   unit: string
   unitCost: number
@@ -320,6 +322,7 @@ export function Purchases() {
           productName: product.name,
           type: product.type,
           size: row.size,
+          colour: DEFAULT_COLOUR,
           quantity: row.quantity,
           unit: 'piece',
           unitCost,
@@ -344,6 +347,7 @@ export function Purchases() {
           productName: product.name,
           type: product.type,
           size,
+          colour: DEFAULT_COLOUR,
           quantity,
           unit: 'piece',
           unitCost,
@@ -395,7 +399,11 @@ export function Purchases() {
       for (const row of newLines) {
         if (row.type === 'garment' && row.size) {
           const keyMatch = next.findIndex(
-            (l) => l.productId === row.productId && l.size === row.size && l.unit === 'piece',
+            (l) =>
+              l.productId === row.productId &&
+              l.size === row.size &&
+              (l.colour || DEFAULT_COLOUR) === (row.colour || DEFAULT_COLOUR) &&
+              l.unit === 'piece',
           )
           if (keyMatch >= 0) {
             const prev = next[keyMatch]
@@ -464,10 +472,13 @@ export function Purchases() {
         sizes = [...sizeNames]
           .filter((sz) => sz.trim())
           .map((sz) => ({
-            id: `${id}-${sz}`,
+            id: makeVariantId(id, DEFAULT_COLOUR, sz),
             productId: id,
             size: sz,
+            colour: DEFAULT_COLOUR,
             quantity: 0, // stock comes from purchase save
+            barcode: makeVariantBarcode(sku, DEFAULT_COLOUR, sz),
+            variantSku: `${sku}-DEF-${sz}`.toUpperCase(),
           }))
       }
 
@@ -583,6 +594,7 @@ export function Purchases() {
         productId: l.productId,
         productName: l.productName,
         size: l.size,
+        colour: l.colour || DEFAULT_COLOUR,
         quantity: l.quantity,
         unit: l.unit,
         unitCost: l.unitCost,
@@ -622,14 +634,23 @@ export function Purchases() {
           await db.purchaseItems.bulkAdd(recItems)
           for (const it of recItems) {
             if (it.size) {
-              const row = await db.productSizes.where({ productId: it.productId, size: it.size }).first()
+              const colour = normalizeColour(it.colour)
+              let row = await db.productSizes
+                .where('productId')
+                .equals(it.productId)
+                .filter((r) => normalizeColour(r.colour) === colour && r.size === it.size)
+                .first()
+              if (!row) row = await db.productSizes.where({ productId: it.productId, size: it.size }).first()
               if (row) await db.productSizes.update(row.id, { quantity: Number(row.quantity) + it.quantity })
               else
                 await db.productSizes.add({
-                  id: `${it.productId}-${it.size}`,
+                  id: makeVariantId(it.productId, colour, it.size),
                   productId: it.productId,
                   size: it.size,
+                  colour,
                   quantity: it.quantity,
+                  barcode: null,
+                  variantSku: null,
                 })
             } else {
               const p = await db.products.get(it.productId)
