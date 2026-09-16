@@ -26,7 +26,7 @@ npm install
 npm run dist:win
 ```
 
-Requires Wine on Linux for the portable/NSIS step. Script `scripts/prepare-desktop-runtime.mjs` fetches the Windows `better-sqlite3` native binary.
+Requires Wine on Linux for the portable/NSIS step. Script `scripts/prepare-desktop-runtime.mjs` fetches the **Electron-ABI** Windows `better-sqlite3` native binary (`prebuild-install --runtime electron --target <electron from apps/desktop/package.json>`), then verifies the `.node` SHA-256 against the official WiseLibs `electron-v{ABI}` release asset (Electron 33.x → **NODE_MODULE_VERSION 130**). Do **not** ship a Node 20 (ABI 115) prebuild — Electron main `import()`s the server in-process, so the binding must match Electron.
 
 NSIS only: `npm run dist:win:nsis -w @laxmi/desktop`  
 Portable only: `npm run dist:win:portable -w @laxmi/desktop`

@@ -1,8 +1,8 @@
 {
   "name": "@laxmi/desktop",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
-  "description": "Laxmi Fashion Wholesale Mart \u2014 Windows desktop (Electron)",
+  "description": "Laxmi Fashion Wholesale Mart — Windows desktop (Electron)",
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
@@ -15,7 +15,7 @@
   "build": {
     "appId": "com.laxmifashion.wholesale",
     "productName": "Laxmi Fashion Wholesale Mart",
-    "copyright": "Copyright \u00a9 Laxmi Fashion Wholesale Mart",
+    "copyright": "Copyright © Laxmi Fashion Wholesale Mart",
     "directories": {
       "output": "release-build",
       "buildResources": "build"

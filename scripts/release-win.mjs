@@ -175,20 +175,23 @@ function main() {
     process.exit(1)
   }
 
+  const hotfix = process.env.RELEASE_NOTES_EXTRA || ''
   const notes = [
     `Laxmi Fashion Wholesale Mart ${tag}`,
     '',
     'Public release — download freely; no GitHub token required for auto-update.',
     '',
+    hotfix,
     '- Windows NSIS installer: LaxmiFashion-Setup.exe (auto-update channel)',
     '- Windows portable: LaxmiFashion-Portable.exe',
     '- Android debug APK: LaxmiFashion.apk (when attached)',
     '- SQLite DB stays in AppData userData across updates',
+    '- Desktop: better-sqlite3 packaged for Electron ABI 130 (Electron 33), not Node 20 ABI 115',
     '',
     'UI: modern retail/SaaS look (maroon + cream). Features unchanged (POS, stock, purchase, four prices, categories, cloud sync, GST-inclusive receipts).',
     '',
     'Updates: Settings → Check for updates (token optional for public repo).',
-  ].join('\n')
+  ].filter((line, i, arr) => !(line === '' && arr[i - 1] === '')).join('\n')
 
   const args = [
     'release',
