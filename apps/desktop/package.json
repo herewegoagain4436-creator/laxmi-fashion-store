@@ -1,6 +1,6 @@
 {
   "name": "@laxmi/desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Laxmi Fashion Wholesale Mart \u2014 Windows desktop (Electron)",
   "main": "electron/main.cjs",
@@ -87,7 +87,7 @@
         "provider": "github",
         "owner": "herewegoagain4436-creator",
         "repo": "laxmi-fashion-store",
-        "private": true,
+        "private": false,
         "releaseType": "release"
       }
     ]

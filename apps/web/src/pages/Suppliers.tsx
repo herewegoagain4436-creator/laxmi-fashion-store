@@ -30,10 +30,13 @@ export function Suppliers() {
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-3 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-brand-800">Suppliers</h1>
+        <div>
+          <h1 className="lf-page-title">Suppliers</h1>
+          <p className="text-sm text-slate-500">Vendor list</p>
+        </div>
         <button
           type="button"
-          className="min-h-[44px] rounded-xl bg-brand-600 px-3 font-semibold text-white"
+          className="lf-btn-primary"
           onClick={() => setForm({ name: '', phone: '', address: '', notes: '' })}
         >
           Add supplier
@@ -44,7 +47,7 @@ export function Suppliers() {
           <button
             key={s.id}
             type="button"
-            className="block w-full rounded-xl border bg-white p-3 text-left"
+            className="block w-full lf-card p-3 text-left"
             onClick={() => setForm(s)}
           >
             <div className="font-semibold">{s.name}</div>
@@ -61,7 +64,7 @@ export function Suppliers() {
             {['name', 'phone', 'address', 'notes'].map((k) => (
               <input
                 key={k}
-                className="mb-2 min-h-[44px] w-full rounded-xl border px-3"
+                className="mb-2 lf-input"
                 placeholder={k[0].toUpperCase() + k.slice(1)}
                 value={(form as Record<string, string>)[k] || ''}
                 onChange={(e) => setForm({ ...form, [k]: e.target.value })}

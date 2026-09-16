@@ -122,7 +122,7 @@ export function Returns() {
           <button
             key={s.id}
             type="button"
-            className="block w-full rounded-xl border bg-white p-3 text-left"
+            className="block w-full lf-card p-3 text-left"
             onClick={() => setSale(s)}
           >
             <div className="flex justify-between">
@@ -175,7 +175,7 @@ export function Returns() {
                 )
               })}
             <input
-              className="mb-2 min-h-[44px] w-full rounded-xl border px-3"
+              className="mb-2 lf-input"
               placeholder="Reason (optional)"
               value={reason}
               onChange={(e) => setReason(e.target.value)}

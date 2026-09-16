@@ -86,7 +86,6 @@ export function compareVersions(a: string, b: string) {
 }
 
 export type ReleaseCheckResult =
-  | { ok: false; reason: 'no-token'; message: string }
   | { ok: false; reason: 'error'; message: string }
   | {
       ok: true
@@ -95,42 +94,37 @@ export type ReleaseCheckResult =
       newer: boolean
       releaseName: string
       releaseUrl: string
-      apk?: { name: string; id: number; size: number; apiUrl: string }
-      setup?: { name: string; id: number; size: number; apiUrl: string }
-      portable?: { name: string; id: number; size: number; apiUrl: string }
+      apk?: { name: string; id: number; size: number; apiUrl: string; browserUrl?: string }
+      setup?: { name: string; id: number; size: number; apiUrl: string; browserUrl?: string }
+      portable?: { name: string; id: number; size: number; apiUrl: string; browserUrl?: string }
       message: string
     }
 
 export async function checkGitHubRelease(token?: string): Promise<ReleaseCheckResult> {
   const t = (token || getWebUpdateToken()).trim()
-  if (!t) {
-    return {
-      ok: false,
-      reason: 'no-token',
-      message: 'Add a private update token in Settings',
-    }
-  }
 
   try {
-    const res = await fetch(`${API}/releases/latest`, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${t}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    })
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    }
+    if (t) headers.Authorization = `Bearer ${t}`
+
+    const res = await fetch(`${API}/releases/latest`, { headers })
     if (res.status === 401 || res.status === 403) {
       return {
         ok: false,
         reason: 'error',
-        message: 'Update auth failed. Check the private update token (Contents + Releases read).',
+        message: t
+          ? 'Update auth failed. Check the optional update token, or clear it and retry (public releases need no token).'
+          : 'GitHub rate-limited or blocked this request. Try again later, or optionally add a GitHub token in Settings.',
       }
     }
     if (res.status === 404) {
       return {
         ok: false,
         reason: 'error',
-        message: 'No releases found (or token cannot see this private repo).',
+        message: 'No public releases found yet.',
       }
     }
     if (!res.ok) {
@@ -140,7 +134,13 @@ export async function checkGitHubRelease(token?: string): Promise<ReleaseCheckRe
       tag_name?: string
       name?: string
       html_url?: string
-      assets?: Array<{ id: number; name: string; size: number; url: string }>
+      assets?: Array<{
+        id: number
+        name: string
+        size: number
+        url: string
+        browser_download_url?: string
+      }>
     }
     const latestVersion = normalizeVer(data.tag_name || data.name || '')
     const currentVersion = getAppVersion()
@@ -149,7 +149,13 @@ export async function checkGitHubRelease(token?: string): Promise<ReleaseCheckRe
     const find = (re: RegExp) => {
       const a = assets.find((x) => re.test(x.name))
       return a
-        ? { name: a.name, id: a.id, size: a.size, apiUrl: a.url }
+        ? {
+            name: a.name,
+            id: a.id,
+            size: a.size,
+            apiUrl: a.url,
+            browserUrl: a.browser_download_url,
+          }
         : undefined
     }
     const apk = find(/LaxmiFashion\.apk$/i)
@@ -179,15 +185,40 @@ export async function checkGitHubRelease(token?: string): Promise<ReleaseCheckRe
   }
 }
 
-/** Download a private release asset using the PAT (for APK on phone / browser). */
+/** Download a release asset. Prefers public browser URL; falls back to authenticated API download. */
 export async function downloadPrivateAsset(
   assetApiUrl: string,
   fileName: string,
   token?: string,
+  browserUrl?: string,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
+  // Public release: open browser download URL when available
+  if (browserUrl && !token && !getWebUpdateToken()) {
+    try {
+      const a = document.createElement('a')
+      a.href = browserUrl
+      a.download = fileName
+      a.target = '_blank'
+      a.rel = 'noreferrer'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, message: String((err as Error)?.message || err) }
+    }
+  }
+
   const t = (token || getWebUpdateToken()).trim()
+  if (!t && browserUrl) {
+    window.open(browserUrl, '_blank', 'noreferrer')
+    return { ok: true }
+  }
   if (!t) {
-    return { ok: false, message: 'Add a private update token in Settings' }
+    return {
+      ok: false,
+      message: 'No download URL. Open the release page, or optionally add a GitHub token in Settings.',
+    }
   }
   try {
     const res = await fetch(assetApiUrl, {

@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -8,13 +10,117 @@ html, body, #root {
 }
 
 body {
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "DM Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
   color: #1a1214;
   background: #faf7f2;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 button, input, select, textarea {
   font: inherit;
+}
+
+@layer components {
+  .lf-card {
+    @apply rounded-2xl border border-brand-100/80 bg-white shadow-soft;
+  }
+
+  .lf-card-muted {
+    @apply rounded-2xl border border-brand-100/60 bg-cream-50 shadow-soft;
+  }
+
+  .lf-input {
+    @apply min-h-[44px] w-full rounded-xl border border-brand-200/90 bg-white px-3 text-sm text-brand-900
+      placeholder:text-slate-400
+      transition
+      focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+  }
+
+  .lf-select {
+    @apply lf-input appearance-none;
+  }
+
+  .lf-label {
+    @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500;
+  }
+
+  .lf-btn {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold
+      transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .lf-btn-primary {
+    @apply lf-btn bg-brand-600 text-white shadow-soft hover:bg-brand-700;
+  }
+
+  .lf-btn-secondary {
+    @apply lf-btn border border-brand-200 bg-white text-brand-800 hover:bg-brand-50;
+  }
+
+  .lf-btn-ghost {
+    @apply lf-btn text-slate-600 hover:bg-brand-50 hover:text-brand-800;
+  }
+
+  .lf-chip {
+    @apply inline-flex items-center rounded-full border px-3 py-1.5 text-sm font-semibold transition;
+  }
+
+  .lf-chip-active {
+    @apply lf-chip border-transparent bg-brand-700 text-white shadow-soft;
+  }
+
+  .lf-chip-idle {
+    @apply lf-chip border-brand-100 bg-white text-brand-800 hover:border-brand-300 hover:bg-brand-50;
+  }
+
+  .lf-page-title {
+    @apply text-xl font-bold tracking-tight text-brand-800;
+  }
+
+  .lf-section-title {
+    @apply text-lg font-bold tracking-tight text-brand-800;
+  }
+
+  .lf-table-wrap {
+    @apply overflow-auto rounded-2xl border border-brand-100/80 bg-white shadow-soft;
+  }
+
+  .lf-table {
+    @apply w-full text-left text-sm;
+  }
+
+  .lf-table thead {
+    @apply sticky top-0 z-10 bg-brand-50/95 text-brand-900 backdrop-blur-sm;
+  }
+
+  .lf-table th {
+    @apply border-b border-brand-100 px-3 py-2.5 text-xs font-semibold uppercase tracking-wide;
+  }
+
+  .lf-table td {
+    @apply px-3 py-2.5 align-top;
+  }
+
+  .lf-table tbody tr {
+    @apply border-t border-brand-50 transition hover:bg-brand-50/60;
+  }
+
+  .lf-table tbody tr:nth-child(even) {
+    @apply bg-cream-50/70;
+  }
+
+  .lf-modal-backdrop {
+    @apply fixed inset-0 z-40 flex items-end justify-center bg-brand-900/40 p-0 backdrop-blur-[2px] sm:items-center sm:p-4;
+  }
+
+  .lf-modal {
+    @apply max-h-[92vh] w-full max-w-lg overflow-auto rounded-t-3xl bg-white p-5 shadow-lift sm:rounded-3xl;
+  }
+
+  .lf-status {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold;
+  }
 }
 
 .chip {

@@ -494,11 +494,14 @@ export function Purchases() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-3 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-brand-800">Purchase bills</h1>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h1 className="lf-page-title">Purchase bills</h1>
+          <p className="text-sm text-slate-500">Stock-in with four prices</p>
+        </div>
         <button
           type="button"
-          className="min-h-[44px] rounded-xl bg-brand-600 px-3 font-semibold text-white"
+          className="lf-btn-primary"
           onClick={openModal}
         >
           New purchase
@@ -509,7 +512,7 @@ export function Purchases() {
           const its = items.filter((i) => i.purchaseId === p.id)
           const sup = suppliers.find((s) => s.id === p.supplierId)
           return (
-            <div key={p.id} className="rounded-xl border bg-white p-3">
+            <div key={p.id} className="lf-card p-4">
               <div className="flex justify-between">
                 <div>
                   <div className="font-semibold">{p.billNo || p.id.slice(0, 8)}</div>
@@ -533,14 +536,14 @@ export function Purchases() {
           )
         })}
         {!purchases.length && (
-          <div className="rounded-xl border border-dashed bg-white p-6 text-center text-sm text-slate-500">
+          <div className="rounded-2xl border border-dashed border-brand-200 bg-white p-8 text-center text-sm text-slate-500">
             No purchases yet. Tap <span className="font-semibold">New purchase</span> to stock in.
           </div>
         )}
       </div>
 
       {open && (
-        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 sm:items-center sm:p-4">
+        <div className="fixed inset-0 z-40 flex items-end justify-center bg-brand-900/40 backdrop-blur-[2px] sm:items-center sm:p-4">
           <div className="flex max-h-[96vh] w-full max-w-3xl flex-col rounded-t-2xl bg-white shadow-pos sm:rounded-2xl">
             <div className="flex items-center justify-between border-b px-4 py-3">
               <h2 className="font-bold text-brand-900">Stock in — new purchase</h2>
@@ -586,7 +589,7 @@ export function Purchases() {
                     Supplier bill no (optional)
                   </label>
                   <input
-                    className="min-h-[44px] w-full rounded-xl border px-3"
+                    className="lf-input"
                     placeholder="e.g. RT-4821"
                     value={billNo}
                     onChange={(e) => setBillNo(e.target.value)}
@@ -598,7 +601,7 @@ export function Purchases() {
                   </label>
                   <input
                     type="date"
-                    className="min-h-[44px] w-full rounded-xl border px-3"
+                    className="lf-input"
                     value={date}
                     onChange={(e) => setDate(e.target.value)}
                   />
@@ -610,7 +613,7 @@ export function Purchases() {
                 <div className="relative mb-2">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
-                    className="min-h-[44px] w-full rounded-xl border bg-white pl-10 pr-3"
+                    className="lf-input pl-10"
                     placeholder="Search products (name / SKU)"
                     value={q}
                     onChange={(e) => setQ(e.target.value)}

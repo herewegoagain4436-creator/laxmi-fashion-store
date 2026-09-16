@@ -237,24 +237,22 @@ export function POS() {
   }
 
   return (
-    <div className="mx-auto grid max-w-7xl gap-4 lg:grid-cols-[1fr_380px]">
+    <div className="mx-auto grid max-w-7xl gap-4 lg:grid-cols-[1fr_360px] xl:grid-cols-[1fr_380px]">
       <section>
         <div className="relative mb-3">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search name, SKU, category…"
-            className="min-h-[48px] w-full rounded-xl border border-brand-200 bg-white pl-10 pr-3"
+            className="lf-input min-h-[48px] pl-10 shadow-soft"
           />
         </div>
         <div className="mb-3 flex flex-wrap gap-2">
           <button
             type="button"
             onClick={() => setCatFilter('all')}
-            className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
-              catFilter === 'all' ? 'bg-brand-700 text-white' : 'border bg-white text-brand-800'
-            }`}
+            className={catFilter === 'all' ? 'lf-chip-active' : 'lf-chip-idle'}
           >
             All
           </button>
@@ -263,15 +261,13 @@ export function POS() {
               key={c.id}
               type="button"
               onClick={() => setCatFilter(c.id)}
-              className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
-                catFilter === c.id ? 'bg-brand-700 text-white' : 'border bg-white text-brand-800'
-              }`}
+              className={catFilter === c.id ? 'lf-chip-active' : 'lf-chip-idle'}
             >
               {c.name}
             </button>
           ))}
         </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
           {filtered.map((p) => {
             const stock =
               p.type === 'garment'
@@ -282,24 +278,24 @@ export function POS() {
                 key={p.id}
                 type="button"
                 onClick={() => openProduct(p)}
-                className="rounded-xl border border-brand-100 bg-white p-3 text-left shadow-sm hover:border-brand-400"
+                className="rounded-2xl border border-brand-100/80 bg-white p-2.5 text-left shadow-soft transition hover:border-brand-300 hover:shadow-card active:scale-[0.99]"
               >
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="font-semibold text-brand-900">{p.name}</div>
-                    <div className="text-xs text-slate-500">
+                <div className="flex items-start justify-between gap-1.5">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-brand-900">{p.name}</div>
+                    <div className="truncate text-[11px] text-slate-500">
                       {p.sku} · {categories.find((c) => c.id === p.categoryId)?.name || typeLabel(p.type)}
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="font-bold text-brand-700">
+                  <div className="shrink-0 text-right">
+                    <div className="text-sm font-bold text-brand-700">
                       {inr(
                         wholesaleMode
                           ? normalizeProductPrices(p as unknown as Record<string, unknown>).wholesalePrice
                           : normalizeProductPrices(p as unknown as Record<string, unknown>).salePrice,
                       )}
                     </div>
-                    <div className="text-[11px] text-slate-500">
+                    <div className="text-[10px] font-medium text-slate-500">
                       {p.type === 'fabric' ? `${stock} m` : `${stock} pcs`}
                     </div>
                   </div>
@@ -310,74 +306,74 @@ export function POS() {
         </div>
       </section>
 
-      <aside className="rounded-2xl border border-brand-100 bg-white p-3 shadow-sm lg:sticky lg:top-3">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <h2 className="font-bold text-brand-800">Bill</h2>
+      <aside className="lf-card sticky bottom-20 z-10 p-4 lg:sticky lg:top-3 lg:bottom-auto">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h2 className="lf-section-title text-base">Bill</h2>
           <button
             type="button"
             onClick={() => {
               setWholesaleMode((v) => !v)
               setCart([])
             }}
-            className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${
-              wholesaleMode ? 'bg-amber-500 text-white' : 'bg-brand-50 text-brand-800'
+            className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide ${
+              wholesaleMode ? 'bg-amber-500 text-white shadow-soft' : 'bg-brand-50 text-brand-800'
             }`}
             title="Clears cart when switching"
           >
             {wholesaleMode ? 'Wholesale bill' : 'Retail bill'}
           </button>
         </div>
-        {err && <div className="mb-2 rounded-lg bg-red-50 px-2 py-1 text-sm text-red-700">{err}</div>}
-        <div className="max-h-56 space-y-2 overflow-auto">
-          {cart.length === 0 && <div className="text-sm text-slate-500">Tap a product to add</div>}
+        {err && <div className="mb-2 rounded-xl border border-red-200 bg-red-50 px-2.5 py-1.5 text-sm text-red-700">{err}</div>}
+        <div className="max-h-52 space-y-1.5 overflow-auto pr-0.5">
+          {cart.length === 0 && <div className="rounded-xl bg-cream-100 px-3 py-4 text-center text-sm text-slate-500">Tap a product to add</div>}
           {cart.map((l) => (
-            <div key={l.key} className="flex items-start justify-between gap-2 rounded-lg bg-cream px-2 py-2">
-              <div>
-                <div className="text-sm font-semibold">{l.productName}</div>
+            <div key={l.key} className="flex items-start justify-between gap-2 rounded-xl border border-brand-50 bg-cream-50 px-2.5 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-brand-900">{l.productName}</div>
                 <div className="text-xs text-slate-500">
                   {l.size ? `Size ${l.size} · ` : ''}
                   {qtyLabel(l.quantity, l.unit)} × {inr(l.rate)}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="font-semibold">{inr(l.lineTotal)}</div>
-                <button type="button" onClick={() => setCart((c) => c.filter((x) => x.key !== l.key))}>
+              <div className="flex shrink-0 items-center gap-2">
+                <div className="text-sm font-semibold">{inr(l.lineTotal)}</div>
+                <button type="button" className="rounded-lg p-1 hover:bg-white" onClick={() => setCart((c) => c.filter((x) => x.key !== l.key))}>
                   <Trash2 className="h-4 w-4 text-slate-400" />
                 </button>
               </div>
             </div>
           ))}
         </div>
-        <label className="mt-3 block text-xs font-medium text-slate-600">
-          Discount (optional)
+        <label className="mt-3 block">
+          <span className="lf-label">Discount (optional)</span>
           <input
             value={discount}
             onChange={(e) => setDiscount(e.target.value)}
             inputMode="decimal"
-            className="mt-1 min-h-[44px] w-full rounded-lg border px-2"
+            className="lf-input"
           />
         </label>
-        <label className="mt-2 block text-xs font-medium text-slate-600">
-          Customer phone (optional)
+        <label className="mt-2 block">
+          <span className="lf-label">Customer phone (optional)</span>
           <input
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             inputMode="tel"
-            className="mt-1 min-h-[44px] w-full rounded-lg border px-2"
+            className="lf-input"
           />
         </label>
-        <div className="mt-3 flex justify-between text-lg font-bold">
-          <span>Total</span>
-          <span>{inr(grand)}</span>
+        <div className="mt-3 flex items-center justify-between rounded-2xl bg-brand-800 px-3 py-2.5 text-white">
+          <span className="text-sm font-medium text-white/80">Total</span>
+          <span className="text-lg font-bold tracking-tight">{inr(grand)}</span>
         </div>
-        <div className="mt-2 grid grid-cols-4 gap-1">
+        <div className="mt-2 grid grid-cols-4 gap-1.5">
           {(['cash', 'upi', 'card', 'split'] as PaymentMode[]).map((m) => (
             <button
               key={m}
               type="button"
               onClick={() => setMode(m)}
-              className={`min-h-[44px] rounded-lg text-xs font-bold uppercase ${
-                mode === m ? 'bg-brand-600 text-white' : 'bg-brand-50 text-brand-800'
+              className={`min-h-[44px] rounded-xl text-xs font-bold uppercase tracking-wide transition ${
+                mode === m ? 'bg-brand-600 text-white shadow-soft' : 'bg-brand-50 text-brand-800 hover:bg-brand-100'
               }`}
             >
               {m}
@@ -386,26 +382,26 @@ export function POS() {
         </div>
         {mode === 'split' && (
           <div className="mt-2 grid grid-cols-3 gap-2">
-            <input value={cash} onChange={(e) => setCash(e.target.value)} placeholder="Cash" className="min-h-[40px] rounded-lg border px-2 text-sm" />
-            <input value={upi} onChange={(e) => setUpi(e.target.value)} placeholder="UPI" className="min-h-[40px] rounded-lg border px-2 text-sm" />
-            <input value={card} onChange={(e) => setCard(e.target.value)} placeholder="Card" className="min-h-[40px] rounded-lg border px-2 text-sm" />
+            <input value={cash} onChange={(e) => setCash(e.target.value)} placeholder="Cash" className="lf-input min-h-[40px]" />
+            <input value={upi} onChange={(e) => setUpi(e.target.value)} placeholder="UPI" className="lf-input min-h-[40px]" />
+            <input value={card} onChange={(e) => setCard(e.target.value)} placeholder="Card" className="lf-input min-h-[40px]" />
           </div>
         )}
         <button
           type="button"
           onClick={() => void checkout()}
-          className="mt-3 min-h-[48px] w-full rounded-xl bg-brand-700 font-bold text-white"
+          className="lf-btn-primary mt-3 min-h-[48px] w-full text-base"
         >
           Complete sale
         </button>
       </aside>
 
       {pick && (
-        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4">
-          <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-t-2xl bg-white p-4 sm:rounded-2xl">
+        <div className="lf-modal-backdrop">
+          <div className="lf-modal">
             <div className="mb-3 flex items-start justify-between">
               <div>
-                <div className="font-bold">{pick.name}</div>
+                <div className="text-lg font-bold tracking-tight text-brand-900">{pick.name}</div>
                 <div className="text-sm text-slate-500">
                   {typeLabel(pick.type)} ·{' '}
                   {inr(
@@ -457,13 +453,13 @@ export function POS() {
                 value={pickQty}
                 onChange={(e) => setPickQty(e.target.value)}
                 inputMode="decimal"
-                className="mt-1 min-h-[48px] w-full rounded-xl border px-3"
+                className="lf-input min-h-[48px]"
               />
             </label>
             <button
               type="button"
               onClick={addPicked}
-              className="mt-3 min-h-[48px] w-full rounded-xl bg-brand-600 font-bold text-white"
+              className="lf-btn-primary mt-3 min-h-[48px] w-full"
             >
               Add to bill
             </button>
@@ -472,21 +468,21 @@ export function POS() {
       )}
 
       {done && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3">
-          <div className="max-h-[95vh] w-full max-w-md overflow-auto rounded-2xl bg-white p-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-brand-900/45 p-3 backdrop-blur-[2px]">
+          <div className="max-h-[95vh] w-full max-w-md overflow-auto rounded-3xl bg-white p-4 shadow-lift">
             <ReceiptView store={store} sale={done.sale} items={done.items} />
             <div className="mt-3 grid grid-cols-2 gap-2 print:hidden">
               <button
                 type="button"
                 onClick={printReceipt}
-                className="flex min-h-[48px] items-center justify-center gap-2 rounded-xl bg-brand-700 font-semibold text-white"
+                className="lf-btn-primary min-h-[48px]"
               >
                 <Printer className="h-4 w-4" /> Print / PDF
               </button>
               <button
                 type="button"
                 onClick={() => setDone(null)}
-                className="min-h-[48px] rounded-xl border font-semibold"
+                className="lf-btn-secondary min-h-[48px]"
               >
                 New sale
               </button>

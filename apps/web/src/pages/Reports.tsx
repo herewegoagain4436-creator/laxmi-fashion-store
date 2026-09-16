@@ -34,7 +34,7 @@ export function Reports() {
         <div className="text-xl font-bold">{inr(card)}</div>
       </div>
       <h2 className="mb-2 mt-6 font-semibold">Low stock</h2>
-      <div className="overflow-auto rounded-xl border bg-white">
+      <div className="overflow-auto lf-card">
         <table className="w-full text-sm">
           <thead className="bg-brand-50">
             <tr>
@@ -64,7 +64,7 @@ export function Reports() {
         </table>
       </div>
       <h2 className="mb-2 mt-6 font-semibold">Stock snapshot</h2>
-      <div className="overflow-auto rounded-xl border bg-white">
+      <div className="overflow-auto lf-card">
         <table className="w-full min-w-[480px] text-sm">
           <thead className="bg-brand-50">
             <tr>

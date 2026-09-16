@@ -35,23 +35,24 @@ function applyTokenToEnv(token) {
 
 function configureUpdater() {
   const token = getUpdateToken()
-  if (!token) {
-    return { ok: false, reason: 'no-token' }
-  }
-  applyTokenToEnv(token)
+  if (token) applyTokenToEnv(token)
 
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
   autoUpdater.allowDowngrade = false
-  // Private GitHub Releases (repo stays private; no public release required)
-  autoUpdater.setFeedURL({
+
+  // Public GitHub Releases (preferred). Optional token still works for rate limits / private forks.
+  const feed = {
     provider: 'github',
     owner: GH_OWNER,
     repo: GH_REPO,
-    private: true,
-    token,
-  })
-  return { ok: true }
+    private: false,
+  }
+  if (token) {
+    feed.token = token
+  }
+  autoUpdater.setFeedURL(feed)
+  return { ok: true, hasToken: Boolean(token) }
 }
 
 function wireEventsOnce() {
@@ -99,7 +100,6 @@ function wireEventsOnce() {
       cancelId: 1,
     })
     if (result.response === 0) {
-      // isSilent=false, isForceRunAfter=true
       autoUpdater.quitAndInstall(false, true)
     }
   })
@@ -110,7 +110,7 @@ function wireEventsOnce() {
     if (/401|403|bad credentials|requires authentication|not found/i.test(msg)) {
       setStatus(
         'error',
-        'Update auth failed. Add a private update token in Settings (repo read + releases).',
+        'Update check failed. Public releases need no token — if this persists, check network or try again later. Optional: add a GitHub token in Settings for higher API limits.',
       )
     } else {
       setStatus('error', msg)
@@ -120,7 +120,7 @@ function wireEventsOnce() {
 
 /**
  * @param {{ silent?: boolean }} opts
- * silent=true: startup check — no alert when up-to-date / no token (status only)
+ * silent=true: startup check — no alert when up-to-date (status only)
  */
 async function checkForUpdates(opts = {}) {
   const silent = Boolean(opts.silent)
@@ -128,30 +128,7 @@ async function checkForUpdates(opts = {}) {
     return setStatus('checking', 'Already checking for updates…')
   }
 
-  const token = getUpdateToken()
-  if (!token) {
-    const status = setStatus(
-      'no-token',
-      'Add a private update token in Settings to check for updates.',
-    )
-    if (!silent) {
-      const win = getMainWindow()
-      await dialog.showMessageBox(win || undefined, {
-        type: 'warning',
-        title: 'Private updates',
-        message: 'Add a private update token in Settings',
-        detail:
-          'This app updates from a private GitHub Release. Paste a fine-grained PAT (Contents + Releases read on this repo) under Settings → Update access token. Advanced users can set GH_TOKEN or LAXMI_GH_TOKEN in the environment.',
-      })
-    }
-    return status
-  }
-
-  const cfg = configureUpdater()
-  if (!cfg.ok) {
-    return setStatus('no-token', 'Add a private update token in Settings to check for updates.')
-  }
-
+  configureUpdater()
   wireEventsOnce()
   checking = true
   try {
@@ -163,10 +140,21 @@ async function checkForUpdates(opts = {}) {
   } catch (err) {
     const msg = String((err && err.message) || err)
     if (/401|403|bad credentials|requires authentication/i.test(msg)) {
-      return setStatus(
+      const status = setStatus(
         'error',
-        'Update auth failed. Add a private update token in Settings.',
+        'Update auth failed. Public releases should work without a token. Optional: paste a PAT in Settings if needed.',
       )
+      if (!silent) {
+        const win = getMainWindow()
+        await dialog.showMessageBox(win || undefined, {
+          type: 'warning',
+          title: 'Update check failed',
+          message: 'Could not check for updates',
+          detail:
+            'This app updates from public GitHub Releases (no token required). If checks fail, check your network. Advanced: set GH_TOKEN or LAXMI_GH_TOKEN, or paste a token under Settings.',
+        })
+      }
+      return status
     }
     return setStatus('error', msg)
   } finally {

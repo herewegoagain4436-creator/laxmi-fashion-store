@@ -212,16 +212,11 @@ export function Settings() {
     setReleaseInfo(null)
     try {
       if (desktop && window.laxmiDesktop) {
-        const meta = await window.laxmiDesktop.getUpdateTokenMeta()
-        if (!meta.hasToken) {
-          setUpdateMsg('Add a private update token in Settings')
-          return
-        }
         const status = await window.laxmiDesktop.checkForUpdates()
         setUpdateMsg(status.message || status.status)
         return
       }
-      // Web / Android: GitHub Releases API (version check + APK download)
+      // Web / Android: public GitHub Releases API (token optional)
       const result = await checkGitHubRelease()
       setReleaseInfo(result)
       setUpdateMsg(result.message)
@@ -234,7 +229,12 @@ export function Settings() {
     if (!releaseInfo || !releaseInfo.ok || !releaseInfo.apk) return
     setUpdateBusy(true)
     try {
-      const r = await downloadPrivateAsset(releaseInfo.apk.apiUrl, releaseInfo.apk.name)
+      const r = await downloadPrivateAsset(
+        releaseInfo.apk.apiUrl,
+        releaseInfo.apk.name,
+        undefined,
+        releaseInfo.apk.browserUrl,
+      )
       setUpdateMsg(r.ok ? 'APK download started.' : r.message)
     } finally {
       setUpdateBusy(false)
@@ -398,35 +398,37 @@ export function Settings() {
 
   return (
     <div className="mx-auto max-w-lg">
-      <h1 className="mb-1 text-xl font-bold text-brand-800">Store profile</h1>
+      <h1 className="lf-page-title mb-1">Store profile</h1>
       <p className="mb-4 text-sm text-slate-600">Shown on sale receipts. GST is never printed.</p>
-      <div className="mb-4">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <SyncBadge />
-        <button type="button" className="ml-2 text-sm underline" onClick={() => void syncNow()}>
+        <button type="button" className="text-sm font-semibold text-brand-700 underline" onClick={() => void syncNow()}>
           Sync now
         </button>
       </div>
-      <label className="mb-2 block text-sm">
-        Shop name
-        <input className="mt-1 min-h-[44px] w-full rounded-xl border px-3" value={name} onChange={(e) => setName(e.target.value)} />
+      <div className="lf-card mb-6 space-y-3 p-4">
+      <label className="block">
+        <span className="lf-label">Shop name</span>
+        <input className="lf-input" value={name} onChange={(e) => setName(e.target.value)} />
       </label>
-      <label className="mb-2 block text-sm">
-        Address
-        <input className="mt-1 min-h-[44px] w-full rounded-xl border px-3" value={address} onChange={(e) => setAddress(e.target.value)} />
+      <label className="block">
+        <span className="lf-label">Address</span>
+        <input className="lf-input" value={address} onChange={(e) => setAddress(e.target.value)} />
       </label>
-      <label className="mb-2 block text-sm">
-        City
-        <input className="mt-1 min-h-[44px] w-full rounded-xl border px-3" value={city} onChange={(e) => setCity(e.target.value)} />
+      <label className="block">
+        <span className="lf-label">City</span>
+        <input className="lf-input" value={city} onChange={(e) => setCity(e.target.value)} />
       </label>
-      <label className="mb-4 block text-sm">
-        Phone
-        <input className="mt-1 min-h-[44px] w-full rounded-xl border px-3" value={phone} onChange={(e) => setPhone(e.target.value)} />
+      <label className="block">
+        <span className="lf-label">Phone</span>
+        <input className="lf-input" value={phone} onChange={(e) => setPhone(e.target.value)} />
       </label>
-      <button type="button" className="mb-6 min-h-[48px] w-full rounded-xl bg-brand-600 font-semibold text-white" onClick={() => void saveProfile()}>
+      <button type="button" className="lf-btn-primary w-full min-h-[48px]" onClick={() => void saveProfile()}>
         {saved ? 'Saved' : 'Save profile'}
       </button>
+      </div>
 
-      <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
+      <section className="lf-card mb-6 p-4">
         <h2 className="mb-1 text-lg font-bold text-brand-800">Stock sync (PC ↔ phone)</h2>
         <p className="mb-3 text-xs text-slate-600">
           Sales and stock are always saved on this device first (works offline). Choose how devices share data when
@@ -460,7 +462,7 @@ export function Settings() {
           <label className="mb-3 block text-sm">
             Shop PC address (same Wi‑Fi)
             <input
-              className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+              className="lf-input mt-1"
               placeholder="http://192.168.x.x:8787"
               value={lanUrl}
               onChange={(e) => setLanUrl(e.target.value)}
@@ -477,7 +479,7 @@ export function Settings() {
             <label className="mb-3 block text-sm">
               Cloud URL (HTTPS)
               <input
-                className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+                className="lf-input mt-1"
                 placeholder="https://your-app.example.com"
                 value={cloudUrl}
                 onChange={(e) => setCloudUrlState(e.target.value)}
@@ -487,7 +489,7 @@ export function Settings() {
             <label className="mb-3 block text-sm">
               Sync token (secret)
               <input
-                className="mt-1 min-h-[44px] w-full rounded-xl border px-3 font-mono text-sm"
+                className="lf-input mt-1 font-mono text-sm"
                 type="password"
                 autoComplete="off"
                 placeholder={hasSyncToken ? '•••••••• (enter new token to replace)' : 'Paste store sync token'}
@@ -520,14 +522,14 @@ export function Settings() {
         <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
           <button
             type="button"
-            className="min-h-[44px] rounded-xl bg-brand-600 font-semibold text-white"
+            className="lf-btn-primary"
             onClick={saveSyncSettings}
           >
             {syncSettingsSaved || syncTokenSaved ? 'Saved' : 'Save sync settings'}
           </button>
           <button
             type="button"
-            className="min-h-[44px] rounded-xl border border-brand-600 font-semibold text-brand-700"
+            className="lf-btn-secondary border-brand-600 text-brand-700"
             onClick={() => void syncNow()}
           >
             Sync now
@@ -548,12 +550,12 @@ export function Settings() {
         </div>
       </section>
 
-      <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
-        <h2 className="mb-1 text-lg font-bold text-brand-800">App updates (private)</h2>
+      <section className="lf-card mb-6 p-4">
+        <h2 className="lf-section-title mb-1">App updates</h2>
         <p className="mb-3 text-xs text-slate-600">
-          Updates come from a <strong>private</strong> GitHub Release (repo stays private). Paste a fine-grained
-          personal access token with <strong>Contents</strong> and <strong>Releases</strong> read on this repo only.
-          On Windows desktop the token is stored with Electron safeStorage under AppData. Advanced: set env{' '}
+          Updates come from <strong>public</strong> GitHub Releases — no token required. Optionally paste a fine-grained
+          PAT (Contents + Releases read) for higher API rate limits or private forks. On Windows desktop an optional
+          token is stored with Electron safeStorage. Advanced: set env{' '}
           <code className="rounded bg-slate-100 px-1">GH_TOKEN</code> or{' '}
           <code className="rounded bg-slate-100 px-1">LAXMI_GH_TOKEN</code>.
         </p>
@@ -561,19 +563,19 @@ export function Settings() {
           Installed version: <strong>{appVersion}</strong>
           {updateTokenMeta.hasToken ? (
             <span className="ml-2 text-emerald-700">
-              · Token set ({updateTokenMeta.source === 'env' ? 'from environment' : 'saved'})
+              · Optional token set ({updateTokenMeta.source === 'env' ? 'from environment' : 'saved'})
             </span>
           ) : (
-            <span className="ml-2 text-amber-700">· No update token yet</span>
+            <span className="ml-2 text-slate-500">· Public updates (no token)</span>
           )}
         </p>
-        <label className="mb-2 block text-sm">
-          Update access token
+        <label className="mb-2 block">
+          <span className="lf-label">Update access token (optional)</span>
           <input
-            className="mt-1 min-h-[44px] w-full rounded-xl border px-3 font-mono text-sm"
+            className="lf-input font-mono text-sm"
             type="password"
             autoComplete="off"
-            placeholder={updateTokenMeta.hasToken ? '•••••••• (enter new token to replace)' : 'github_pat_…'}
+            placeholder={updateTokenMeta.hasToken ? '•••••••• (enter new token to replace)' : 'github_pat_… (optional)'}
             value={updateToken}
             onChange={(e) => setUpdateTokenState(e.target.value)}
           />
@@ -581,14 +583,14 @@ export function Settings() {
         <div className="mb-3 grid grid-cols-2 gap-2">
           <button
             type="button"
-            className="min-h-[44px] rounded-xl bg-brand-600 font-semibold text-white"
+            className="lf-btn-primary"
             onClick={() => void saveUpdateToken()}
           >
             {updateTokenSaved ? 'Saved' : 'Save update token'}
           </button>
           <button
             type="button"
-            className="min-h-[44px] rounded-xl border font-semibold text-slate-700"
+            className="lf-btn-secondary"
             onClick={() => void clearUpdateToken()}
           >
             Clear token
@@ -597,17 +599,13 @@ export function Settings() {
         <button
           type="button"
           disabled={updateBusy}
-          className="mb-2 min-h-[44px] w-full rounded-xl border border-brand-600 font-semibold text-brand-700 disabled:opacity-60"
+          className="lf-btn-secondary mb-2 w-full border-brand-600 text-brand-700"
           onClick={() => void onCheckUpdates()}
         >
           {updateBusy ? 'Checking…' : 'Check for updates'}
         </button>
         {updateMsg && (
-          <p
-            className={`mb-2 text-sm ${
-              /add a private update token/i.test(updateMsg) ? 'font-semibold text-amber-800' : 'text-slate-700'
-            }`}
-          >
+          <p className="mb-2 text-sm text-slate-700">
             {updateMsg}
           </p>
         )}
@@ -643,7 +641,7 @@ export function Settings() {
         )}
       </section>
 
-      <section className="mb-4 rounded-2xl border border-brand-100 bg-cream/50 p-4">
+      <section className="lf-card-muted mb-4 p-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-bold text-brand-800">Categories</h2>
           <button
@@ -741,7 +739,7 @@ export function Settings() {
             <label className="mb-2 block text-sm">
               Name
               <input
-                className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+                className="lf-input mt-1"
                 value={draft.name}
                 onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 placeholder="e.g. Kids wear"

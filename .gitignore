@@ -43,3 +43,7 @@ gh-token*
 deploy-secrets.txt
 laxmi-sync-token.txt
 release/exe-parts/
+
+release/*.yml
+release/*.blockmap
+release/builder-debug.yml

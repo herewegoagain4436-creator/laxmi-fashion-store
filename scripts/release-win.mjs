@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Private Windows release for Laxmi Fashion.
+ * Public Windows release for Laxmi Fashion.
  *
  * - Bumps version (or uses VERSION=x.y.z)
  * - Builds NSIS + portable via electron-builder (emits latest.yml for electron-updater)
- * - Creates a **private** GitHub Release (repo is private; do NOT use --public)
+ * - Creates a **public** GitHub Release (repo is public)
  * - Attaches Setup.exe, Portable.exe, latest.yml, blockmap, and optional APK
  *
  * Requires: gh authenticated as a repo collaborator (herewegoagain4436-creator).
@@ -142,8 +142,8 @@ function main() {
   const version = process.env.VERSION ? parseVersion(process.env.VERSION).raw : bumpPatch(current)
   const tag = `v${version}`
 
-  console.log(`\n=== Laxmi Fashion private Windows release ${tag} ===\n`)
-  console.log(`Repo: ${OWNER_REPO} (private releases — never --public)\n`)
+  console.log(`\n=== Laxmi Fashion public Windows release ${tag} ===\n`)
+  console.log(`Repo: ${OWNER_REPO} (public releases)\n`)
 
   setAllVersions(version)
 
@@ -178,13 +178,16 @@ function main() {
   const notes = [
     `Laxmi Fashion Wholesale Mart ${tag}`,
     '',
-    'Private release — collaborators only.',
+    'Public release — download freely; no GitHub token required for auto-update.',
     '',
     '- Windows NSIS installer: LaxmiFashion-Setup.exe (auto-update channel)',
     '- Windows portable: LaxmiFashion-Portable.exe',
+    '- Android debug APK: LaxmiFashion.apk (when attached)',
     '- SQLite DB stays in AppData userData across updates',
     '',
-    'Shop owner: paste a fine-grained PAT in Settings → Update access token.',
+    'UI: modern retail/SaaS look (maroon + cream). Features unchanged (POS, stock, purchase, four prices, categories, cloud sync, GST-inclusive receipts).',
+    '',
+    'Updates: Settings → Check for updates (token optional for public repo).',
   ].join('\n')
 
   const args = [
@@ -198,13 +201,12 @@ function main() {
     `Laxmi Fashion ${tag}`,
     '--notes',
     notes,
-    // Do NOT pass --public. Private repo releases stay private.
   ]
 
   run('gh', args)
 
-  console.log(`\nDone. Private release ${tag} published on ${OWNER_REPO}`)
-  console.log('Desktop apps with a valid update token will see this via electron-updater.\n')
+  console.log(`\nDone. Public release ${tag} published on ${OWNER_REPO}`)
+  console.log('Desktop apps will see this via electron-updater (no PAT required for public releases).\n')
 }
 
 main()

@@ -239,25 +239,28 @@ export function Inventory() {
 
   return (
     <div className="mx-auto max-w-6xl">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-bold text-brand-800">Inventory</h1>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h1 className="lf-page-title">Inventory</h1>
+          <p className="text-sm text-slate-500">Stock, four prices, and categories</p>
+        </div>
         {owner && (
           <button
             type="button"
             onClick={() => openEdit()}
-            className="inline-flex min-h-[44px] items-center gap-1 rounded-xl bg-brand-600 px-3 font-semibold text-white"
+            className="lf-btn-primary"
           >
             <Plus className="h-4 w-4" /> Add product
           </button>
         )}
       </div>
       <div className="relative mb-3">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+        <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search products"
-          className="min-h-[44px] w-full rounded-xl border bg-white pl-10 pr-3"
+          className="lf-input pl-10 shadow-soft"
         />
       </div>
       <div className="mb-3 flex flex-wrap gap-2">
@@ -266,26 +269,24 @@ export function Inventory() {
             key={t.key}
             type="button"
             onClick={() => setTab(t.key)}
-            className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
-              tab === t.key ? 'bg-brand-700 text-white' : 'bg-white text-brand-800 border'
-            }`}
+            className={tab === t.key ? 'lf-chip-active' : 'lf-chip-idle'}
           >
             {t.label}
           </button>
         ))}
       </div>
-      <div className="overflow-auto rounded-xl border bg-white">
-        <table className="w-full min-w-[720px] text-left text-sm">
-          <thead className="bg-brand-50 text-brand-900">
+      <div className="lf-table-wrap max-h-[70vh]">
+        <table className="lf-table min-w-[720px]">
+          <thead>
             <tr>
-              <th className="px-3 py-2">Product</th>
-              <th className="px-3 py-2">Category</th>
-              <th className="px-3 py-2">Stock</th>
-              <th className="px-3 py-2">Purchase</th>
-              <th className="px-3 py-2">Wholesale</th>
-              <th className="px-3 py-2">MRP</th>
-              <th className="px-3 py-2">Sale</th>
-              <th className="px-3 py-2"></th>
+              <th>Product</th>
+              <th>Category</th>
+              <th>Stock</th>
+              <th>Purchase</th>
+              <th>Wholesale</th>
+              <th>MRP</th>
+              <th>Sale</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -294,7 +295,7 @@ export function Inventory() {
               const low = isLowStock(p)
               const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
               return (
-                <tr key={p.id} className="border-t">
+                <tr key={p.id}>
                   <td className="px-3 py-2">
                     <div className="font-semibold">{p.name}</div>
                     <div className="text-xs text-slate-500">{p.sku}</div>
@@ -342,18 +343,18 @@ export function Inventory() {
       </div>
 
       {form && owner && (
-        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 sm:items-center">
-          <div className="max-h-[92vh] w-full max-w-lg overflow-auto rounded-t-2xl bg-white p-4 sm:rounded-2xl">
-            <h2 className="mb-3 font-bold">{editId ? 'Edit product' : 'New product'}</h2>
+        <div className="lf-modal-backdrop">
+          <div className="lf-modal">
+            <h2 className="mb-3 text-lg font-bold tracking-tight text-brand-800">{editId ? 'Edit product' : 'New product'}</h2>
             <div className="grid gap-2">
               <input
-                className="min-h-[44px] rounded-xl border px-3"
+                className="lf-input"
                 placeholder="Name"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
               />
               <input
-                className="min-h-[44px] rounded-xl border px-3"
+                className="lf-input"
                 placeholder="SKU"
                 value={form.sku}
                 onChange={(e) => setForm({ ...form, sku: e.target.value })}
@@ -361,7 +362,7 @@ export function Inventory() {
               <label className="block text-sm font-medium">
                 Category
                 <select
-                  className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+                  className="lf-input mt-1"
                   value={form.categoryId}
                   onChange={(e) => void onCategoryChange(e.target.value)}
                 >
@@ -376,7 +377,7 @@ export function Inventory() {
                 Stock behaviour: {typeLabel(form.type)} ({baseTypeHint(form.type)})
               </p>
 
-              <div className="rounded-xl border border-brand-100 bg-cream/40 p-3">
+              <div className="rounded-2xl border border-brand-100 bg-cream-50 p-3">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="text-sm font-semibold text-brand-800">Prices</div>
                   <button
@@ -391,7 +392,7 @@ export function Inventory() {
                   <label className="text-xs font-medium text-slate-600">
                     Purchase (cost)
                     <input
-                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      className="lf-input mt-1"
                       placeholder="Purchase"
                       value={form.purchasePrice}
                       inputMode="decimal"
@@ -401,7 +402,7 @@ export function Inventory() {
                   <label className="text-xs font-medium text-slate-600">
                     Wholesale
                     <input
-                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      className="lf-input mt-1"
                       placeholder="Wholesale"
                       value={form.wholesalePrice}
                       inputMode="decimal"
@@ -414,7 +415,7 @@ export function Inventory() {
                   <label className="text-xs font-medium text-slate-600">
                     MRP
                     <input
-                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      className="lf-input mt-1"
                       placeholder="MRP"
                       value={form.mrp}
                       inputMode="decimal"
@@ -427,7 +428,7 @@ export function Inventory() {
                   <label className="text-xs font-medium text-slate-600">
                     Sale (retail)
                     <input
-                      className="mt-1 min-h-[44px] w-full rounded-xl border bg-white px-3"
+                      className="lf-input mt-1"
                       placeholder="Sale"
                       value={form.salePrice}
                       inputMode="decimal"
@@ -446,14 +447,14 @@ export function Inventory() {
 
               {form.type !== 'garment' && (
                 <input
-                  className="min-h-[44px] rounded-xl border px-3"
+                  className="lf-input"
                   placeholder={form.type === 'fabric' ? 'Stock (metres)' : 'Stock (pieces)'}
                   value={form.quantity}
                   onChange={(e) => setForm({ ...form, quantity: e.target.value })}
                 />
               )}
               <input
-                className="min-h-[44px] rounded-xl border px-3"
+                className="lf-input"
                 placeholder="Low stock alert"
                 value={form.lowStockThreshold}
                 onChange={(e) => setForm({ ...form, lowStockThreshold: e.target.value })}
@@ -483,10 +484,10 @@ export function Inventory() {
               )}
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2">
-              <button type="button" className="min-h-[44px] rounded-xl border" onClick={() => setForm(null)}>
+              <button type="button" className="lf-btn-secondary" onClick={() => setForm(null)}>
                 Cancel
               </button>
-              <button type="button" className="min-h-[44px] rounded-xl bg-brand-600 font-semibold text-white" onClick={() => void save()}>
+              <button type="button" className="lf-btn-primary" onClick={() => void save()}>
                 Save
               </button>
             </div>
