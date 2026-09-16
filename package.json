@@ -18,7 +18,8 @@
     "build:desktop-runtime": "node scripts/prepare-desktop-runtime.mjs",
     "dist:win": "npm run build && npm run build:desktop-runtime && npm run dist:win -w @laxmi/desktop && node scripts/copy-win-artifact.mjs",
     "dist:android": "npm run build -w @laxmi/web && node scripts/build-android.mjs",
-    "cap:sync": "npm run build -w @laxmi/web && npx cap sync android"
+    "cap:sync": "npm run build -w @laxmi/web && npx cap sync android",
+    "release:win": "node scripts/release-win.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

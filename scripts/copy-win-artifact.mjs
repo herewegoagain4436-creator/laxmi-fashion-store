@@ -13,7 +13,9 @@ if (!fs.existsSync(outDir)) {
 }
 
 const files = fs.readdirSync(outDir)
-const artifacts = files.filter((f) => /\.(exe|zip|msi)$/i.test(f) || f.endsWith('.exe'))
+const artifacts = files.filter(
+  (f) => /\.(exe|zip|msi|yml|yaml|blockmap)$/i.test(f) && fs.statSync(path.join(outDir, f)).isFile(),
+)
 console.log('Builder outputs:', files)
 
 for (const f of artifacts) {
@@ -24,10 +26,16 @@ for (const f of artifacts) {
   console.log(`Copied ${dest} (${(st.size / 1024 / 1024).toFixed(2)} MB)`)
 }
 
-// Prefer clear names
-const portable = artifacts.find((f) => /portable/i.test(f) || f.endsWith('.exe'))
+const portable = artifacts.find((f) => /portable/i.test(f))
 if (portable) {
   const alias = path.join(release, 'LaxmiFashion-Portable.exe')
   fs.copyFileSync(path.join(outDir, portable), alias)
+  console.log('Alias:', alias)
+}
+
+const setup = artifacts.find((f) => /setup/i.test(f) && f.endsWith('.exe'))
+if (setup) {
+  const alias = path.join(release, 'LaxmiFashion-Setup.exe')
+  fs.copyFileSync(path.join(outDir, setup), alias)
   console.log('Alias:', alias)
 }

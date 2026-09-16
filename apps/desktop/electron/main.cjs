@@ -1,14 +1,23 @@
-const { app, BrowserWindow, shell, dialog } = require('electron')
+'use strict'
+
+const { app, BrowserWindow, shell, dialog, ipcMain, Menu } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
+const {
+  getUpdateToken,
+  setUpdateToken,
+  clearUpdateToken,
+  hasStoredToken,
+  hasEnvToken,
+} = require('./token-store.cjs')
+const { checkForUpdates, getUpdateStatus } = require('./updater.cjs')
 
 const DEFAULT_PORT = Number(process.env.PORT || 8787)
 let mainWindow = null
 let starting = false
 
 function resolveResource(...parts) {
-  // In production: resources/app.asar.unpacked or resources/
   if (app.isPackaged) {
     return path.join(process.resourcesPath, ...parts)
   }
@@ -40,6 +49,7 @@ async function startBackend() {
   const dbDir = path.join(userData, 'data')
   fs.mkdirSync(dbDir, { recursive: true })
 
+  // SQLite always under userData — app updates must never wipe this path
   process.env.LAXMI_DB = path.join(dbDir, 'laxmi.db')
   process.env.LAXMI_WEB_DIST = app.isPackaged
     ? path.join(process.resourcesPath, 'web-dist')
@@ -48,7 +58,6 @@ async function startBackend() {
   process.env.HOST = '127.0.0.1'
   process.env.LAXMI_SECRET = process.env.LAXMI_SECRET || 'laxmi-fashion-desktop-secret'
 
-  // Prefer compiled server dist; fall back to tsx in dev
   const serverEntryPackaged = path.join(process.resourcesPath, 'server', 'index.js')
   const serverEntryDev = path.join(__dirname, '..', '..', 'server', 'dist', 'index.js')
   const serverEntry = app.isPackaged ? serverEntryPackaged : serverEntryDev
@@ -59,12 +68,12 @@ async function startBackend() {
     )
   }
 
-  // Native module path: better-sqlite3 lives next to server in resources
   if (app.isPackaged) {
     const serverNodeModules = path.join(process.resourcesPath, 'server', 'node_modules')
     module.paths.unshift(serverNodeModules)
-    // Also help ESM resolver via NODE_PATH
-    process.env.NODE_PATH = [serverNodeModules, process.env.NODE_PATH || ''].filter(Boolean).join(path.delimiter)
+    process.env.NODE_PATH = [serverNodeModules, process.env.NODE_PATH || '']
+      .filter(Boolean)
+      .join(path.delimiter)
   }
 
   const { pathToFileURL } = require('url')
@@ -76,6 +85,117 @@ async function startBackend() {
   return DEFAULT_PORT
 }
 
+function buildMenu() {
+  const isMac = process.platform === 'darwin'
+  const template = [
+    ...(isMac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: 'File',
+      submenu: [isMac ? { role: 'close' } : { role: 'quit' }],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Check for updates…',
+          click: () => {
+            void checkForUpdates({ silent: false })
+          },
+        },
+        {
+          label: 'Open Settings (in app)',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.loadURL(`http://127.0.0.1:${DEFAULT_PORT}/settings`)
+            }
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'About',
+          click: () => {
+            const ver = require('../package.json').version
+            dialog.showMessageBox(mainWindow || undefined, {
+              type: 'info',
+              title: 'About',
+              message: 'Laxmi Fashion Wholesale Mart',
+              detail: `Version ${ver}\nData folder: ${app.getPath('userData')}\nUpdates: private GitHub Releases`,
+            })
+          },
+        },
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+function registerIpc() {
+  ipcMain.handle('laxmi:get-app-version', () => require('../package.json').version)
+
+  ipcMain.handle('laxmi:get-update-token-meta', () => ({
+    hasToken: Boolean(getUpdateToken()),
+    hasStoredToken: hasStoredToken(),
+    hasEnvToken: hasEnvToken(),
+    source: hasEnvToken() ? 'env' : hasStoredToken() ? 'stored' : 'none',
+  }))
+
+  ipcMain.handle('laxmi:set-update-token', (_e, token) => {
+    setUpdateToken(typeof token === 'string' ? token : '')
+    return {
+      ok: true,
+      hasToken: Boolean(getUpdateToken()),
+      source: hasEnvToken() ? 'env' : hasStoredToken() ? 'stored' : 'none',
+    }
+  })
+
+  ipcMain.handle('laxmi:clear-update-token', () => {
+    clearUpdateToken()
+    return { ok: true, hasToken: Boolean(getUpdateToken()) }
+  })
+
+  ipcMain.handle('laxmi:check-for-updates', async () => {
+    return checkForUpdates({ silent: false })
+  })
+
+  ipcMain.handle('laxmi:get-update-status', () => getUpdateStatus())
+}
+
 function createWindow(port) {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -84,6 +204,7 @@ function createWindow(port) {
     minHeight: 600,
     title: 'Laxmi Fashion Wholesale Mart',
     webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -108,8 +229,16 @@ async function boot() {
   if (starting) return
   starting = true
   try {
+    registerIpc()
+    buildMenu()
     const port = await startBackend()
     createWindow(port)
+    // Private update check on startup (quiet if no token / already latest)
+    if (app.isPackaged) {
+      setTimeout(() => {
+        void checkForUpdates({ silent: true })
+      }, 4000)
+    }
   } catch (err) {
     console.error(err)
     dialog.showErrorBox(

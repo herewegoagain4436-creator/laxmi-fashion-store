@@ -16,6 +16,16 @@ import { SyncBadge } from '../components/SyncBadge'
 import { inr } from '../lib/format'
 import { uid } from '../lib/ids'
 import type { Category, CategoryPricingRules, ProductType } from '../types'
+import {
+  checkGitHubRelease,
+  clearWebUpdateToken,
+  downloadPrivateAsset,
+  getAppVersion,
+  getWebUpdateToken,
+  isElectronDesktop,
+  setWebUpdateToken,
+  type ReleaseCheckResult,
+} from '../lib/appUpdate'
 
 const BASE_TYPES: ProductType[] = ['garment', 'saree', 'fabric']
 
@@ -40,6 +50,17 @@ export function Settings() {
   const [city, setCity] = useState('')
   const [apiBase, setApiBaseState] = useState('')
   const [apiSaved, setApiSaved] = useState(false)
+  const desktop = isElectronDesktop()
+  const [updateToken, setUpdateTokenState] = useState('')
+  const [updateTokenSaved, setUpdateTokenSaved] = useState(false)
+  const [updateTokenMeta, setUpdateTokenMeta] = useState<{
+    hasToken: boolean
+    source: string
+  }>({ hasToken: false, source: 'none' })
+  const [updateBusy, setUpdateBusy] = useState(false)
+  const [updateMsg, setUpdateMsg] = useState('')
+  const [releaseInfo, setReleaseInfo] = useState<ReleaseCheckResult | null>(null)
+  const [appVersion, setAppVersion] = useState(getAppVersion())
   const [samplePurchase, setSamplePurchase] = useState('100')
   const [saved, setSaved] = useState(false)
   const [catMsg, setCatMsg] = useState('')
@@ -72,10 +93,98 @@ export function Settings() {
     setApiBaseState(getApiBase())
   }, [])
 
+  useEffect(() => {
+    setAppVersion(getAppVersion())
+    if (desktop && window.laxmiDesktop) {
+      void window.laxmiDesktop.getAppVersion().then(setAppVersion).catch(() => {})
+      void window.laxmiDesktop.getUpdateTokenMeta().then((m) => {
+        setUpdateTokenMeta({ hasToken: m.hasToken, source: m.source })
+      })
+      const unsub = window.laxmiDesktop.onUpdateStatus((s) => {
+        setUpdateMsg(s.message || s.status)
+      })
+      return unsub
+    }
+    setUpdateTokenMeta({
+      hasToken: Boolean(getWebUpdateToken()),
+      source: getWebUpdateToken() ? 'stored' : 'none',
+    })
+  }, [desktop])
+
   function saveApiBase() {
     setApiBase(apiBase)
     setApiSaved(true)
     setTimeout(() => setApiSaved(false), 1500)
+  }
+
+  async function saveUpdateToken() {
+    setUpdateMsg('')
+    if (desktop && window.laxmiDesktop) {
+      const r = await window.laxmiDesktop.setUpdateToken(updateToken)
+      setUpdateTokenMeta({ hasToken: r.hasToken, source: r.source })
+      setUpdateTokenState('')
+      setUpdateTokenSaved(true)
+      setTimeout(() => setUpdateTokenSaved(false), 1500)
+      setUpdateMsg(r.hasToken ? 'Update token saved (encrypted on this PC).' : 'Token cleared.')
+      return
+    }
+    setWebUpdateToken(updateToken)
+    setUpdateTokenMeta({
+      hasToken: Boolean(getWebUpdateToken()),
+      source: getWebUpdateToken() ? 'stored' : 'none',
+    })
+    setUpdateTokenState('')
+    setUpdateTokenSaved(true)
+    setTimeout(() => setUpdateTokenSaved(false), 1500)
+    setUpdateMsg(getWebUpdateToken() ? 'Update token saved on this device.' : 'Token cleared.')
+  }
+
+  async function clearUpdateToken() {
+    if (desktop && window.laxmiDesktop) {
+      await window.laxmiDesktop.clearUpdateToken()
+      setUpdateTokenMeta({ hasToken: false, source: 'none' })
+    } else {
+      clearWebUpdateToken()
+      setUpdateTokenMeta({ hasToken: false, source: 'none' })
+    }
+    setUpdateTokenState('')
+    setReleaseInfo(null)
+    setUpdateMsg('Update token cleared.')
+  }
+
+  async function onCheckUpdates() {
+    setUpdateBusy(true)
+    setUpdateMsg('')
+    setReleaseInfo(null)
+    try {
+      if (desktop && window.laxmiDesktop) {
+        const meta = await window.laxmiDesktop.getUpdateTokenMeta()
+        if (!meta.hasToken) {
+          setUpdateMsg('Add a private update token in Settings')
+          return
+        }
+        const status = await window.laxmiDesktop.checkForUpdates()
+        setUpdateMsg(status.message || status.status)
+        return
+      }
+      // Web / Android: GitHub Releases API (version check + APK download)
+      const result = await checkGitHubRelease()
+      setReleaseInfo(result)
+      setUpdateMsg(result.message)
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
+
+  async function onDownloadApk() {
+    if (!releaseInfo || !releaseInfo.ok || !releaseInfo.apk) return
+    setUpdateBusy(true)
+    try {
+      const r = await downloadPrivateAsset(releaseInfo.apk.apiUrl, releaseInfo.apk.name)
+      setUpdateMsg(r.ok ? 'APK download started.' : r.message)
+    } finally {
+      setUpdateBusy(false)
+    }
   }
 
   const sample = Number(samplePurchase) || 0
@@ -286,6 +395,101 @@ export function Settings() {
         >
           {apiSaved ? 'Saved' : 'Save sync server'}
         </button>
+      </section>
+
+      <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
+        <h2 className="mb-1 text-lg font-bold text-brand-800">App updates (private)</h2>
+        <p className="mb-3 text-xs text-slate-600">
+          Updates come from a <strong>private</strong> GitHub Release (repo stays private). Paste a fine-grained
+          personal access token with <strong>Contents</strong> and <strong>Releases</strong> read on this repo only.
+          On Windows desktop the token is stored with Electron safeStorage under AppData. Advanced: set env{' '}
+          <code className="rounded bg-slate-100 px-1">GH_TOKEN</code> or{' '}
+          <code className="rounded bg-slate-100 px-1">LAXMI_GH_TOKEN</code>.
+        </p>
+        <p className="mb-3 text-xs text-slate-500">
+          Installed version: <strong>{appVersion}</strong>
+          {updateTokenMeta.hasToken ? (
+            <span className="ml-2 text-emerald-700">
+              · Token set ({updateTokenMeta.source === 'env' ? 'from environment' : 'saved'})
+            </span>
+          ) : (
+            <span className="ml-2 text-amber-700">· No update token yet</span>
+          )}
+        </p>
+        <label className="mb-2 block text-sm">
+          Update access token
+          <input
+            className="mt-1 min-h-[44px] w-full rounded-xl border px-3 font-mono text-sm"
+            type="password"
+            autoComplete="off"
+            placeholder={updateTokenMeta.hasToken ? '•••••••• (enter new token to replace)' : 'github_pat_…'}
+            value={updateToken}
+            onChange={(e) => setUpdateTokenState(e.target.value)}
+          />
+        </label>
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            className="min-h-[44px] rounded-xl bg-brand-600 font-semibold text-white"
+            onClick={() => void saveUpdateToken()}
+          >
+            {updateTokenSaved ? 'Saved' : 'Save update token'}
+          </button>
+          <button
+            type="button"
+            className="min-h-[44px] rounded-xl border font-semibold text-slate-700"
+            onClick={() => void clearUpdateToken()}
+          >
+            Clear token
+          </button>
+        </div>
+        <button
+          type="button"
+          disabled={updateBusy}
+          className="mb-2 min-h-[44px] w-full rounded-xl border border-brand-600 font-semibold text-brand-700 disabled:opacity-60"
+          onClick={() => void onCheckUpdates()}
+        >
+          {updateBusy ? 'Checking…' : 'Check for updates'}
+        </button>
+        {updateMsg && (
+          <p
+            className={`mb-2 text-sm ${
+              /add a private update token/i.test(updateMsg) ? 'font-semibold text-amber-800' : 'text-slate-700'
+            }`}
+          >
+            {updateMsg}
+          </p>
+        )}
+        {releaseInfo && releaseInfo.ok && releaseInfo.newer && (
+          <div className="rounded-xl border border-brand-100 bg-brand-50 p-3 text-sm text-brand-900">
+            <div className="mb-2 font-semibold">
+              New version {releaseInfo.latestVersion} (you have {releaseInfo.currentVersion})
+            </div>
+            {releaseInfo.apk && (
+              <button
+                type="button"
+                className="mb-2 min-h-[40px] w-full rounded-xl bg-brand-700 font-semibold text-white"
+                disabled={updateBusy}
+                onClick={() => void onDownloadApk()}
+              >
+                Download LaxmiFashion.apk
+              </button>
+            )}
+            <a
+              className="text-xs underline"
+              href={releaseInfo.releaseUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open release page on GitHub
+            </a>
+          </div>
+        )}
+        {desktop && (
+          <p className="mt-2 text-[11px] text-slate-500">
+            Desktop also checks on startup (Help → Check for updates). Shop data in AppData is kept across updates.
+          </p>
+        )}
       </section>
 
       <section className="mb-4 rounded-2xl border border-brand-100 bg-cream/50 p-4">

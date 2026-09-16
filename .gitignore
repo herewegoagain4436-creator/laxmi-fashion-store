@@ -29,3 +29,9 @@ android/build/
 android/captures/
 android/local.properties
 android/.idea/
+
+# Never commit update tokens / local secrets
+**/update-token.bin
+**/update-token.txt
+*.pat
+gh-token*

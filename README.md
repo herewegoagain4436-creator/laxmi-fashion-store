@@ -80,7 +80,10 @@ apps/server   Express + SQLite API
 
 ## Desktop (Windows) & Android
 
-See [PACKAGING.md](./PACKAGING.md) for full details.
+See [PACKAGING.md](./PACKAGING.md) for full details — including **private** GitHub auto-updates (no public releases).
+
+Shop owner: Settings → **Update access token** → **Save update token** → **Check for updates**.  
+Publish: `npm run release:win` (uses `gh` on a private Release).
 
 ```bash
 # Windows portable .exe → release/LaxmiFashion-Portable.exe
