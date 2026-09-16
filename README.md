@@ -65,6 +65,8 @@ Then open http://localhost:8787 (server serves the built web app and `/api`).
 
 Badge in the header: **Synced** / **Pending** / **Offline**. Sales use UUID ids (idempotent on the server). Writes go to IndexedDB first, then sync to SQLite.
 
+**Cloud sync (PC ↔ phone over the internet):** see [CLOUD_SYNC.md](./CLOUD_SYNC.md). In **Settings → Stock sync**, choose **Cloud**, paste the HTTPS URL and sync token, then **Sync now**.
+
 ## Seed data
 
 On first server start: owner + cashier, store profile, sample garments (with sizes), sarees, fabrics, supplier **Rajasthan Textiles**. The browser seeds the same catalog for offline-first use.
@@ -94,4 +96,4 @@ npm run dist:android
 ```
 
 - **Windows:** double-click `LaxmiFashion-Portable.exe`. Data in AppData. Login `owner` / `owner123`.
-- **Android:** install `LaxmiFashion.apk` (debug build; allow unknown sources). Offline-first; set sync server URL in Settings to reach the shop PC.
+- **Android:** install `LaxmiFashion.apk` (debug build; allow unknown sources). Offline-first; Settings → **Stock sync** → **Cloud** (or LAN PC) to share stock with the shop PC.

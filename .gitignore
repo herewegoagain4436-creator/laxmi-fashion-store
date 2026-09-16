@@ -35,3 +35,11 @@ android/.idea/
 **/update-token.txt
 *.pat
 gh-token*
+
+# Local cloud / tunnel tools & secrets
+.tools/
+.env.*
+!.env.example
+deploy-secrets.txt
+laxmi-sync-token.txt
+release/exe-parts/

@@ -11,7 +11,18 @@ import {
   slugify,
 } from '../lib/pricing'
 import { flushOutbox, syncNow } from '../sync'
-import { getApiBase, setApiBase } from '../api'
+import {
+  checkSyncHealth,
+  getCloudUrl,
+  getLanApiBase,
+  getSyncMode,
+  getSyncToken,
+  setApiBase,
+  setCloudUrl,
+  setSyncMode,
+  setSyncToken,
+  type SyncMode,
+} from '../api'
 import { SyncBadge } from '../components/SyncBadge'
 import { inr } from '../lib/format'
 import { uid } from '../lib/ids'
@@ -48,8 +59,15 @@ export function Settings() {
   const [address, setAddress] = useState('')
   const [phone, setPhone] = useState('')
   const [city, setCity] = useState('')
-  const [apiBase, setApiBaseState] = useState('')
-  const [apiSaved, setApiSaved] = useState(false)
+  const [syncMode, setSyncModeState] = useState<SyncMode>('offline')
+  const [lanUrl, setLanUrl] = useState('')
+  const [cloudUrl, setCloudUrlState] = useState('')
+  const [syncTokenInput, setSyncTokenInput] = useState('')
+  const [syncTokenSaved, setSyncTokenSaved] = useState(false)
+  const [hasSyncToken, setHasSyncToken] = useState(false)
+  const [syncSettingsSaved, setSyncSettingsSaved] = useState(false)
+  const [syncHealthMsg, setSyncHealthMsg] = useState('')
+  const [syncHealthOk, setSyncHealthOk] = useState<boolean | null>(null)
   const desktop = isElectronDesktop()
   const [updateToken, setUpdateTokenState] = useState('')
   const [updateTokenSaved, setUpdateTokenSaved] = useState(false)
@@ -90,7 +108,10 @@ export function Settings() {
   }, [store])
 
   useEffect(() => {
-    setApiBaseState(getApiBase())
+    setSyncModeState(getSyncMode())
+    setLanUrl(getLanApiBase())
+    setCloudUrlState(getCloudUrl())
+    setHasSyncToken(Boolean(getSyncToken()))
   }, [])
 
   useEffect(() => {
@@ -111,10 +132,43 @@ export function Settings() {
     })
   }, [desktop])
 
-  function saveApiBase() {
-    setApiBase(apiBase)
-    setApiSaved(true)
-    setTimeout(() => setApiSaved(false), 1500)
+  function saveSyncSettings() {
+    setSyncMode(syncMode)
+    setApiBase(lanUrl)
+    setCloudUrl(cloudUrl)
+    if (syncTokenInput.trim()) {
+      setSyncToken(syncTokenInput)
+      setSyncTokenInput('')
+      setHasSyncToken(true)
+      setSyncTokenSaved(true)
+      setTimeout(() => setSyncTokenSaved(false), 1500)
+    }
+    setSyncSettingsSaved(true)
+    setTimeout(() => setSyncSettingsSaved(false), 1500)
+    setSyncHealthMsg('')
+    setSyncHealthOk(null)
+  }
+
+  function clearSyncTokenField() {
+    setSyncToken('')
+    setSyncTokenInput('')
+    setHasSyncToken(false)
+    setSyncHealthMsg('Sync token cleared on this device.')
+    setSyncHealthOk(null)
+  }
+
+  async function onCheckSyncHealth() {
+    // Persist current form values first so health uses what user typed
+    setSyncMode(syncMode)
+    setApiBase(lanUrl)
+    setCloudUrl(cloudUrl)
+    if (syncTokenInput.trim()) {
+      setSyncToken(syncTokenInput)
+      setHasSyncToken(true)
+    }
+    const r = await checkSyncHealth()
+    setSyncHealthOk(r.ok)
+    setSyncHealthMsg(r.detail)
   }
 
   async function saveUpdateToken() {
@@ -373,28 +427,125 @@ export function Settings() {
       </button>
 
       <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
-        <h2 className="mb-1 text-lg font-bold text-brand-800">Sync server (phones / Android)</h2>
+        <h2 className="mb-1 text-lg font-bold text-brand-800">Stock sync (PC ↔ phone)</h2>
         <p className="mb-3 text-xs text-slate-600">
-          Optional. Leave empty for offline-only on this device (IndexedDB). To sync with the shop PC, enter the PC
-          address like <code className="rounded bg-slate-100 px-1">http://192.168.1.10:8787</code> (same Wi‑Fi). Desktop
-          app uses the built-in local server automatically.
+          Sales and stock are always saved on this device first (works offline). Choose how devices share data when
+          online. For home + shop on different networks, use <strong>Cloud</strong> with the HTTPS URL and secret token
+          from your shop setup (see CLOUD_SYNC.md).
         </p>
-        <label className="mb-3 block text-sm">
-          API server URL
-          <input
-            className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
-            placeholder="http://192.168.x.x:8787"
-            value={apiBase}
-            onChange={(e) => setApiBaseState(e.target.value)}
-          />
-        </label>
+
+        <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {(
+            [
+              { id: 'offline' as const, label: 'Offline only', hint: 'This device only' },
+              { id: 'lan' as const, label: 'LAN PC', hint: 'Same Wi‑Fi' },
+              { id: 'cloud' as const, label: 'Cloud', hint: 'Internet / HTTPS' },
+            ] as const
+          ).map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setSyncModeState(opt.id)}
+              className={`min-h-[52px] rounded-xl border px-2 text-left ${
+                syncMode === opt.id ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-400' : 'bg-white'
+              }`}
+            >
+              <div className="text-sm font-semibold text-brand-900">{opt.label}</div>
+              <div className="text-[11px] text-slate-500">{opt.hint}</div>
+            </button>
+          ))}
+        </div>
+
+        {syncMode === 'lan' && (
+          <label className="mb-3 block text-sm">
+            Shop PC address (same Wi‑Fi)
+            <input
+              className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+              placeholder="http://192.168.x.x:8787"
+              value={lanUrl}
+              onChange={(e) => setLanUrl(e.target.value)}
+            />
+            <span className="mt-1 block text-[11px] text-slate-500">
+              Desktop app on the PC already runs a local server. On the phone, enter the PC&apos;s LAN IP. Leave empty on
+              the PC itself (uses built-in server).
+            </span>
+          </label>
+        )}
+
+        {syncMode === 'cloud' && (
+          <>
+            <label className="mb-3 block text-sm">
+              Cloud URL (HTTPS)
+              <input
+                className="mt-1 min-h-[44px] w-full rounded-xl border px-3"
+                placeholder="https://your-app.example.com"
+                value={cloudUrl}
+                onChange={(e) => setCloudUrlState(e.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <label className="mb-3 block text-sm">
+              Sync token (secret)
+              <input
+                className="mt-1 min-h-[44px] w-full rounded-xl border px-3 font-mono text-sm"
+                type="password"
+                autoComplete="off"
+                placeholder={hasSyncToken ? '•••••••• (enter new token to replace)' : 'Paste store sync token'}
+                value={syncTokenInput}
+                onChange={(e) => setSyncTokenInput(e.target.value)}
+              />
+              <span className="mt-1 block text-[11px] text-slate-500">
+                Same token on PC and phone. Never share publicly. {hasSyncToken ? 'Token is saved on this device.' : ''}
+              </span>
+            </label>
+            {hasSyncToken && (
+              <button
+                type="button"
+                className="mb-3 text-xs font-semibold text-red-600 underline"
+                onClick={clearSyncTokenField}
+              >
+                Clear sync token
+              </button>
+            )}
+          </>
+        )}
+
+        {syncMode === 'offline' && (
+          <p className="mb-3 rounded-lg bg-slate-50 px-2 py-2 text-xs text-slate-600">
+            Offline only: no automatic sync. Switch to <strong>Cloud</strong> when you want the phone and PC to share
+            stock over the internet.
+          </p>
+        )}
+
+        <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <button
+            type="button"
+            className="min-h-[44px] rounded-xl bg-brand-600 font-semibold text-white"
+            onClick={saveSyncSettings}
+          >
+            {syncSettingsSaved || syncTokenSaved ? 'Saved' : 'Save sync settings'}
+          </button>
+          <button
+            type="button"
+            className="min-h-[44px] rounded-xl border border-brand-600 font-semibold text-brand-700"
+            onClick={() => void syncNow()}
+          >
+            Sync now
+          </button>
+        </div>
         <button
           type="button"
-          className="min-h-[44px] w-full rounded-xl border border-brand-600 font-semibold text-brand-700"
-          onClick={saveApiBase}
+          className="mb-2 min-h-[40px] w-full rounded-xl border text-sm font-semibold text-slate-700"
+          onClick={() => void onCheckSyncHealth()}
         >
-          {apiSaved ? 'Saved' : 'Save sync server'}
+          Check connection
         </button>
+        {syncHealthMsg && (
+          <p className={`text-sm ${syncHealthOk ? 'text-emerald-800' : 'text-amber-800'}`}>{syncHealthMsg}</p>
+        )}
+        <div className="mt-2">
+          <SyncBadge />
+        </div>
       </section>
 
       <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">

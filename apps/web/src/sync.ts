@@ -1,4 +1,4 @@
-import { api } from './api'
+import { api, isRemoteSyncEnabled } from './api'
 import { applySnapshot, db, pendingCount } from './db'
 import type { Snapshot } from './types'
 
@@ -42,6 +42,11 @@ async function refreshPending() {
 }
 
 export async function pullSnapshot() {
+  if (!isRemoteSyncEnabled()) {
+    state = { ...state, lastError: null }
+    emit()
+    return
+  }
   const pending = await pendingCount()
   if (pending > 0) {
     await flushOutbox()
@@ -56,6 +61,10 @@ export async function pullSnapshot() {
 
 export async function flushOutbox() {
   if (state.syncing) return
+  if (!isRemoteSyncEnabled()) {
+    await refreshPending()
+    return
+  }
   const pending = await db.outbox.where('synced').equals(0).sortBy('createdAt')
   if (!pending.length) {
     await refreshPending()
@@ -144,6 +153,15 @@ export function startSyncLoop() {
 }
 
 export async function syncNow() {
+  if (!isRemoteSyncEnabled()) {
+    state = {
+      ...state,
+      lastError: 'Sync mode is Offline only — choose LAN PC or Cloud in Settings',
+    }
+    emit()
+    await refreshPending()
+    return
+  }
   if (!navigator.onLine) {
     state = { ...state, online: false, lastError: 'Offline' }
     emit()

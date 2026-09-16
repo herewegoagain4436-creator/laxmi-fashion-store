@@ -1,0 +1,12 @@
+# Railway — https://docs.railway.app/
+# railway login && railway init && railway variables set LAXMI_SYNC_TOKEN=...
+# railway up
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"

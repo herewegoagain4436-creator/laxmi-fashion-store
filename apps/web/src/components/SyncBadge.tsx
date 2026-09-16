@@ -1,18 +1,28 @@
 import { useEffect, useState } from 'react'
 import { Cloud, CloudOff, RefreshCw } from 'lucide-react'
+import { isRemoteSyncEnabled } from '../api'
 import { getSyncState, subscribeSync, syncNow, type SyncState } from '../sync'
 
 export function SyncBadge({ compact = false }: { compact?: boolean }) {
   const [s, setS] = useState<SyncState>(getSyncState)
   useEffect(() => subscribeSync(setS), [])
 
-  const label = !s.online ? 'Offline' : s.pending > 0 || s.syncing ? 'Pending' : 'Synced'
+  const remote = isRemoteSyncEnabled()
+  const label = !remote
+    ? 'Local'
+    : !s.online
+      ? 'Offline'
+      : s.pending > 0 || s.syncing
+        ? 'Pending'
+        : 'Synced'
   const cls =
     label === 'Synced'
       ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
       : label === 'Pending'
         ? 'bg-amber-50 text-amber-900 border-amber-200'
-        : 'bg-slate-100 text-slate-700 border-slate-300'
+        : label === 'Local'
+          ? 'bg-slate-50 text-slate-600 border-slate-200'
+          : 'bg-slate-100 text-slate-700 border-slate-300'
 
   return (
     <button

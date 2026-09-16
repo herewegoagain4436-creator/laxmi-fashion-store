@@ -1,0 +1,41 @@
+# Fly.io — https://fly.io/docs/flyctl/deploy/
+# Prerequisites: fly auth login && fly apps create laxmi-fashion-sync
+# Secrets: fly secrets set LAXMI_SYNC_TOKEN=... LAXMI_SECRET=...
+# Deploy: fly deploy
+
+app = "laxmi-fashion-sync"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8787"
+  LAXMI_DATA_DIR = "/data"
+  LAXMI_WEB_DIST = "/app/apps/web/dist"
+  LAXMI_ALLOW_LOCALHOST_NO_TOKEN = "0"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/api/health"
+
+[mounts]
+  source = "laxmi_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

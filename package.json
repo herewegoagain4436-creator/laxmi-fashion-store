@@ -19,7 +19,9 @@
     "dist:win": "npm run build && npm run build:desktop-runtime && npm run dist:win -w @laxmi/desktop && node scripts/copy-win-artifact.mjs",
     "dist:android": "npm run build -w @laxmi/web && node scripts/build-android.mjs",
     "cap:sync": "npm run build -w @laxmi/web && npx cap sync android",
-    "release:win": "node scripts/release-win.mjs"
+    "release:win": "node scripts/release-win.mjs",
+    "start:cloud": "bash scripts/run-cloud-local.sh",
+    "tunnel": "bash scripts/cloudflare-tunnel.sh"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

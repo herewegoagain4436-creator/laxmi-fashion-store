@@ -1,0 +1,29 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Connect this repo in the Render dashboard, or: render blueprint launch
+# Set secret env vars in the dashboard (do not commit real tokens).
+
+services:
+  - type: web
+    name: laxmi-fashion-sync
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PORT
+        value: "8787"
+      - key: LAXMI_DATA_DIR
+        value: /data
+      - key: LAXMI_WEB_DIST
+        value: /app/apps/web/dist
+      - key: LAXMI_ALLOW_LOCALHOST_NO_TOKEN
+        value: "0"
+      - key: LAXMI_SYNC_TOKEN
+        sync: false
+      - key: LAXMI_SECRET
+        generateValue: true
+    disk:
+      name: laxmi-data
+      mountPath: /data
+      sizeGB: 1

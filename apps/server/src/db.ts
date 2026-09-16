@@ -4,7 +4,11 @@ import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-export const dataDir = path.join(__dirname, '..', 'data')
+/** Prefer LAXMI_DATA_DIR (cloud/Docker volume); LAXMI_DB overrides full file path. */
+export const dataDir =
+  process.env.LAXMI_DATA_DIR ||
+  process.env.LAXMI_DB_DIR ||
+  path.join(__dirname, '..', 'data')
 
 const dbPath = process.env.LAXMI_DB || path.join(dataDir, 'laxmi.db')
 fs.mkdirSync(path.dirname(dbPath), { recursive: true })

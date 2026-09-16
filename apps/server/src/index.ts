@@ -10,9 +10,64 @@ import { hashPassword, seedIfEmpty } from './seed.js'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SECRET = process.env.LAXMI_SECRET || 'laxmi-fashion-dev-secret'
 const PORT = Number(process.env.PORT || 8787)
+/** Shared store secret for cloud / LAN sync. Empty = not enforced (local desktop/dev). */
+const SYNC_TOKEN = (process.env.LAXMI_SYNC_TOKEN || '').trim()
+/** When SYNC_TOKEN is set, allow requests from loopback without token (optional local-dev bypass). Default on. */
+const ALLOW_LOCALHOST_NO_TOKEN = (process.env.LAXMI_ALLOW_LOCALHOST_NO_TOKEN || '1') !== '0'
 
 type Authed = Request & {
   user?: { id: string; username: string; role: string; name: string }
+  storeTokenOk?: boolean
+}
+
+const SYNC_USER = {
+  id: 'store-sync',
+  username: 'sync',
+  role: 'owner',
+  name: 'Store Sync',
+} as const
+
+function timingSafeEqualStr(a: string, b: string) {
+  const ba = Buffer.from(a)
+  const bb = Buffer.from(b)
+  if (ba.length !== bb.length) return false
+  return crypto.timingSafeEqual(ba, bb)
+}
+
+function clientIsLoopback(req: Request) {
+  const raw = (req.socket.remoteAddress || '').replace(/^::ffff:/, '')
+  return raw === '127.0.0.1' || raw === '::1' || raw === 'localhost'
+}
+
+function extractBearer(req: Request) {
+  const h = req.headers.authorization || ''
+  return h.startsWith('Bearer ') ? h.slice(7).trim() : ''
+}
+
+function extractStoreToken(req: Request) {
+  const x = req.headers['x-laxmi-token']
+  if (typeof x === 'string' && x.trim()) return x.trim()
+  if (Array.isArray(x) && x[0]) return String(x[0]).trim()
+  const bearer = extractBearer(req)
+  // Bearer may be either the store sync token or a user JWT (payload.sig)
+  if (bearer && SYNC_TOKEN && timingSafeEqualStr(bearer, SYNC_TOKEN)) return bearer
+  return ''
+}
+
+function storeTokenSatisfied(req: Request) {
+  if (!SYNC_TOKEN) return true
+  if (ALLOW_LOCALHOST_NO_TOKEN && clientIsLoopback(req)) return true
+  const presented = extractStoreToken(req)
+  return Boolean(presented && timingSafeEqualStr(presented, SYNC_TOKEN))
+}
+
+/** Require LAXMI_SYNC_TOKEN when configured (Bearer or X-Laxmi-Token). */
+function requireStoreToken(req: Authed, res: Response, next: NextFunction) {
+  if (!storeTokenSatisfied(req)) {
+    return res.status(401).json({ error: 'Invalid or missing sync token' })
+  }
+  req.storeTokenOk = true
+  next()
 }
 
 function signToken(user: { id: string; username: string; role: string; name: string }) {
@@ -40,9 +95,22 @@ function verifyToken(token: string) {
 }
 
 function auth(req: Authed, res: Response, next: NextFunction) {
-  const h = req.headers.authorization || ''
-  const token = h.startsWith('Bearer ') ? h.slice(7) : ''
-  const user = token ? verifyToken(token) : null
+  if (!storeTokenSatisfied(req)) {
+    return res.status(401).json({ error: 'Invalid or missing sync token' })
+  }
+  const bearer = extractBearer(req)
+  let user: Authed['user'] = undefined
+  if (bearer && !(SYNC_TOKEN && timingSafeEqualStr(bearer, SYNC_TOKEN))) {
+    user = verifyToken(bearer) || undefined
+  }
+  // Offline-first clients may sync with store token only (no user JWT yet)
+  if (!user && SYNC_TOKEN && extractStoreToken(req)) {
+    user = { ...SYNC_USER }
+  }
+  if (!user && !SYNC_TOKEN) {
+    // Dev / desktop without store token: JWT required as before
+    user = bearer ? verifyToken(bearer) || undefined : undefined
+  }
   if (!user) return res.status(401).json({ error: 'Unauthorized' })
   req.user = user
   next()
@@ -57,14 +125,29 @@ migrate()
 const seeded = seedIfEmpty()
 
 const app = express()
-app.use(cors())
+const corsOrigins = (process.env.LAXMI_CORS_ORIGIN || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+app.use(
+  cors({
+    origin: corsOrigins.length ? corsOrigins : true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Laxmi-Token'],
+    exposedHeaders: ['X-Laxmi-Token'],
+  }),
+)
 app.use(express.json({ limit: '2mb' }))
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, name: 'Laxmi Fashion Wholesale Mart', time: nowIso() })
+  res.json({
+    ok: true,
+    name: 'Laxmi Fashion Wholesale Mart',
+    time: nowIso(),
+    syncTokenRequired: Boolean(SYNC_TOKEN),
+  })
 })
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', requireStoreToken, (req, res) => {
   const username = String(req.body?.username || '').trim().toLowerCase()
   const password = String(req.body?.password || '')
   const user = db
@@ -623,6 +706,8 @@ export async function startServer(options: StartServerOptions = {}) {
     const server = app.listen(port, host, () => {
       console.log(`Laxmi Fashion server http://${host}:${port}`)
       if (webDist && fs.existsSync(webDist)) console.log(`Serving UI from ${webDist}`)
+      if (SYNC_TOKEN) console.log('Store sync token: required (Bearer or X-Laxmi-Token)')
+      else console.log('Store sync token: not set (dev / local desktop)')
       if (seeded) console.log('Seeded owner/owner123 and cashier/cashier123')
       resolve()
     })
