@@ -67,6 +67,10 @@ Repo root includes:
 
 Health check: `GET /api/health` (no token).
 
+### Deploy status (v1.3.0)
+
+No shared cloud host is live in this release until Fly/Railway/Render login is available. See `.deploy/CLOUD_BLOCKER.md`.
+
 ### Fly.io (example)
 
 ```bash

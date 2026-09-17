@@ -61,6 +61,10 @@ export function Settings() {
   const [phone, setPhone] = useState('')
   const [city, setCity] = useState('')
   const [upiVpa, setUpiVpa] = useState('')
+  const [remnantThreshold, setRemnantThreshold] = useState('3')
+  const [razorpayKeyId, setRazorpayKeyId] = useState('')
+  const [razorpayKeySecret, setRazorpayKeySecret] = useState('')
+  const [razorpayWebhookSecret, setRazorpayWebhookSecret] = useState('')
   const [gstin, setGstin] = useState('')
   const [apparelThreshold, setApparelThreshold] = useState('2500')
   const [apparelLow, setApparelLow] = useState('5')
@@ -116,6 +120,10 @@ export function Settings() {
     setPhone(store.phone)
     setCity(store.city)
     setUpiVpa(store.upiVpa || '')
+    setRemnantThreshold(String(store.remnantThreshold ?? 3))
+    setRazorpayKeyId(store.razorpayKeyId || '')
+    setRazorpayKeySecret(store.razorpayKeySecret || '')
+    setRazorpayWebhookSecret(store.razorpayWebhookSecret || '')
     setGstin(store.gstin || '')
     const g = normalizeGstSettings(store.gstSettings)
     setApparelThreshold(String(g.apparelThreshold))
@@ -294,6 +302,10 @@ export function Settings() {
       maxCashierDiscount: Number(maxCashierDiscount) || 0,
       maxCashierDiscountPct: Number(maxCashierDiscountPct) || 0,
       barcodePrefix: barcodePrefix.trim().toUpperCase(),
+      remnantThreshold: Number(remnantThreshold) || 3,
+      razorpayKeyId: razorpayKeyId.trim(),
+      razorpayKeySecret: razorpayKeySecret.trim(),
+      razorpayWebhookSecret: razorpayWebhookSecret.trim(),
     }
     await db.store.put(rec)
     await enqueue('store', rec, rec.id)
@@ -463,6 +475,54 @@ export function Settings() {
           placeholder="shop@upi"
         />
       </label>
+      <label className="block">
+        <span className="lf-label">Fabric remnant alert (metres)</span>
+        <input
+          className="lf-input"
+          value={remnantThreshold}
+          onChange={(e) => setRemnantThreshold(e.target.value)}
+          inputMode="decimal"
+        />
+      </label>
+      <div className="rounded-xl border border-dashed border-brand-200 bg-white p-3">
+        <div className="mb-2 text-sm font-semibold text-brand-800">Razorpay UPI gateway (optional)</div>
+        <p className="mb-2 text-[11px] text-slate-500">
+          Leave blank to keep the static UPI QR + UTR flow. Keys are stored on this device and synced to your cloud
+          server when configured.
+        </p>
+        <label className="mb-2 block text-xs">
+          Key ID
+          <input
+            className="lf-input mt-1 font-mono"
+            value={razorpayKeyId}
+            onChange={(e) => setRazorpayKeyId(e.target.value)}
+            placeholder="rzp_live_…"
+            autoComplete="off"
+          />
+        </label>
+        <label className="mb-2 block text-xs">
+          Key Secret
+          <input
+            className="lf-input mt-1 font-mono"
+            type="password"
+            value={razorpayKeySecret}
+            onChange={(e) => setRazorpayKeySecret(e.target.value)}
+            placeholder="••••••••"
+            autoComplete="off"
+          />
+        </label>
+        <label className="block text-xs">
+          Webhook secret
+          <input
+            className="lf-input mt-1 font-mono"
+            type="password"
+            value={razorpayWebhookSecret}
+            onChange={(e) => setRazorpayWebhookSecret(e.target.value)}
+            placeholder="whsec_… (optional)"
+            autoComplete="off"
+          />
+        </label>
+      </div>
       <label className="block">
         <span className="lf-label">Barcode prefix (optional)</span>
         <input

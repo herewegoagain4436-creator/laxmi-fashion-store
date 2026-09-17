@@ -1,8 +1,8 @@
 export type Role = 'owner' | 'cashier'
 /** Stock behaviour base type (sizes / piece / metre). */
 export type ProductType = 'garment' | 'saree' | 'fabric'
-export type PaymentMode = 'cash' | 'upi' | 'card' | 'split'
-export type SaleStatus = 'completed' | 'returned' | 'partial_return' | 'held'
+export type PaymentMode = 'cash' | 'upi' | 'card' | 'split' | 'credit'
+export type SaleStatus = 'completed' | 'returned' | 'partial_return' | 'held' | 'voided'
 export type PriceChannel = 'retail' | 'wholesale'
 export type SaleLineKind = 'sale' | 'return'
 
@@ -75,6 +75,14 @@ export type StoreProfile = {
   maxCashierDiscountPct?: number
   /** Optional prefix prepended to auto-generated variant barcodes. */
   barcodePrefix?: string
+  /** Default remnant alert threshold (metres) for fabric rolls */
+  remnantThreshold?: number
+  /** Razorpay Key ID (optional UPI gateway) */
+  razorpayKeyId?: string
+  /** Razorpay Key Secret — stored locally; only sent to own sync server */
+  razorpayKeySecret?: string
+  /** Razorpay webhook secret (server-side verify) */
+  razorpayWebhookSecret?: string
 }
 
 /** Colour × size stock row (variant). colour defaults to "Default" for migrated stock. */
@@ -121,6 +129,10 @@ export type Product = {
   fabricSellUnit: 'metre' | 'cm' | null
   /** Optional default shade for fabric/than */
   shade?: string | null
+  /** Default than width (inches) when rolls omit width */
+  fabricWidth?: string | null
+  /** Alert when any roll remaining metres fall below this (default 3) */
+  remnantThreshold?: number | null
   createdAt: string
   updatedAt: string
   deletedAt?: string | null
@@ -149,6 +161,10 @@ export type PurchaseItem = {
   unit: string
   unitCost: number
   lineTotal: number
+  fabricWidth?: string | null
+  shade?: string | null
+  lot?: string | null
+  fabricRollId?: string | null
 }
 
 export type Purchase = {
@@ -186,6 +202,9 @@ export type SaleItem = {
   lineKind?: SaleLineKind
   /** When lineKind=return, original sale item id if known. */
   returnOfSaleItemId?: string | null
+  /** Fabric roll consumed (than billing) */
+  fabricRollId?: string | null
+  fabricWidth?: string | null
 }
 
 export type Sale = {
@@ -211,6 +230,14 @@ export type Sale = {
   gstTotal?: number
   /** Original bill id when this sale includes exchange returns. */
   exchangeOfSaleId?: string | null
+  /** Linked customer for udhaar / credit */
+  customerId?: string | null
+  /** Amount put on credit / udhaar */
+  creditAmount?: number
+  /** Soft-void reason when status=voided */
+  voidReason?: string | null
+  voidedAt?: string | null
+  voidedBy?: string | null
 }
 
 export type ReturnRecord = {
@@ -263,7 +290,7 @@ export type HeldBill = {
 export type OutboxItem = {
   localId?: number
   id: string
-  type: 'product' | 'supplier' | 'purchase' | 'sale' | 'return' | 'store' | 'category' | 'stock_ledger'
+  type: 'product' | 'supplier' | 'purchase' | 'sale' | 'return' | 'store' | 'category' | 'stock_ledger' | 'customer' | 'customer_payment' | 'fabric_roll' | 'audit'
   payload: unknown
   createdAt: string
   synced: number
@@ -283,6 +310,10 @@ export type Snapshot = {
   saleItems: SaleItem[]
   returns: ReturnRecord[]
   returnItems: ReturnItem[]
+  customers?: Customer[]
+  customerPayments?: CustomerPayment[]
+  fabricRolls?: FabricRoll[]
+  auditLog?: AuditLogEntry[]
   serverTime: string
 }
 
@@ -304,3 +335,74 @@ export const DEFAULT_CATEGORY_IDS = {
   saree: 'cat-saree',
   fabric: 'cat-fabric',
 } as const
+
+/** Fabric roll / than width inches (common Indian market). */
+export type FabricWidth = '44' | '54' | '60'
+
+export type FabricRoll = {
+  id: string
+  productId: string
+  width: FabricWidth | string
+  shade: string
+  lot: string
+  /** Remaining length in metres */
+  remainingMetres: number
+  /** Original length when received */
+  initialMetres: number
+  remnantThreshold: number
+  barcode?: string | null
+  purchaseId?: string | null
+  purchaseItemId?: string | null
+  createdAt: string
+  updatedAt: string
+  deletedAt?: string | null
+}
+
+export type Customer = {
+  id: string
+  phone: string
+  name: string
+  gstin?: string
+  /** Outstanding udhaar balance (positive = customer owes shop) */
+  balance: number
+  notes?: string
+  createdAt: string
+  updatedAt: string
+  deletedAt?: string | null
+}
+
+export type CustomerPayment = {
+  id: string
+  customerId: string
+  amount: number
+  mode: 'cash' | 'upi' | 'card' | 'adjust'
+  saleId?: string | null
+  notes?: string
+  createdAt: string
+  createdBy?: string
+}
+
+export type AuditAction =
+  | 'void'
+  | 'discount'
+  | 'return'
+  | 'stock_adjust'
+  | 'price_edit'
+  | 'credit_sale'
+  | 'credit_payment'
+  | 'sale_void'
+
+export type AuditLogEntry = {
+  id: string
+  action: AuditAction | string
+  entityType: string
+  entityId: string
+  userId?: string
+  userName?: string
+  detail: string
+  createdAt: string
+}
+
+export const FABRIC_WIDTHS = ['44', '54', '60'] as const
+
+export const DEFAULT_REMNANT_THRESHOLD = 3

@@ -79,6 +79,10 @@ export async function flushOutbox() {
     purchases: [],
     sales: [],
     returns: [],
+    customers: [],
+    customerPayments: [],
+    fabricRolls: [],
+    audit: [],
   }
   const ids: number[] = []
   for (const item of pending) {
@@ -87,6 +91,7 @@ export async function flushOutbox() {
       body.store = item.payload
       continue
     }
+    if (item.type === 'stock_ledger') continue
     const key =
       item.type === 'sale'
         ? 'sales'
@@ -98,7 +103,15 @@ export async function flushOutbox() {
               ? 'products'
               : item.type === 'category'
                 ? 'categories'
-                : 'suppliers'
+                : item.type === 'customer'
+                  ? 'customers'
+                  : item.type === 'customer_payment'
+                    ? 'customerPayments'
+                    : item.type === 'fabric_roll'
+                      ? 'fabricRolls'
+                      : item.type === 'audit'
+                        ? 'audit'
+                        : 'suppliers'
     if (!body[key]) body[key] = []
     ;(body[key] as unknown[]).push(item.payload)
   }

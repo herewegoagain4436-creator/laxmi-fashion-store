@@ -9,6 +9,7 @@ import { uid } from '../lib/ids'
 import { computePricesFromPurchase, defaultCategoryIdForType, normalizeProductPrices } from '../lib/pricing'
 import { printBarcodeLabels } from '../lib/printBarcodeLabels'
 import { flushOutbox } from '../sync'
+import { writeAudit } from '../lib/audit'
 import type { Category, Product, ProductSize, ProductType, StoreProfile } from '../types'
 import { DEFAULT_COLOUR, STANDARD_SIZES } from '../types'
 import { buildMatrix, makeVariantBarcode, normalizeColour, variantKey } from '../lib/variants'
@@ -252,11 +253,42 @@ export function Inventory() {
       createdAt: t,
       updatedAt: t,
     }
-    await db.transaction('rw', db.products, db.productSizes, db.outbox, async () => {
+    const prev = editId ? products.find((x) => x.id === editId) : null
+    await db.transaction('rw', [db.products, db.productSizes, db.outbox, db.auditLog], async () => {
       await db.products.put(product)
       await db.productSizes.where('productId').equals(id).delete()
       if (sizes.length) await db.productSizes.bulkPut(sizes)
       await enqueue('product', { ...product, sizes }, product.id)
+      if (
+        prev &&
+        (Number(prev.salePrice) !== Number(product.salePrice) ||
+          Number(prev.mrp) !== Number(product.mrp) ||
+          Number(prev.wholesalePrice) !== Number(product.wholesalePrice) ||
+          Number(prev.purchasePrice) !== Number(product.purchasePrice))
+      ) {
+        await writeAudit({
+          action: 'price_edit',
+          entityType: 'product',
+          entityId: id,
+          userId: user?.id,
+          userName: user?.name,
+          detail: {
+            name: product.name,
+            before: {
+              purchase: prev.purchasePrice,
+              wholesale: prev.wholesalePrice,
+              mrp: prev.mrp,
+              sale: prev.salePrice,
+            },
+            after: {
+              purchase: product.purchasePrice,
+              wholesale: product.wholesalePrice,
+              mrp: product.mrp,
+              sale: product.salePrice,
+            },
+          },
+        })
+      }
     })
     void flushOutbox()
     setForm(null)

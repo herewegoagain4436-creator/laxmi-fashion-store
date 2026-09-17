@@ -23,7 +23,10 @@ import { ColourSwatches } from '../components/ColourSwatches'
 import { MetreKeypad } from '../components/MetreKeypad'
 import { ReceiptView, printReceipt } from '../components/Receipt'
 import { SizeChips } from '../components/SizeChips'
-import { applyLocalStockDelta, db, enqueue, getActiveCategories, productsWithSizes } from '../db'
+import { applyLocalStockDelta, consumeFabricRoll, db, enqueue, getActiveCategories, productsWithSizes } from '../db'
+import { writeAudit } from '../lib/audit'
+import { applyCreditSale, findCustomerByPhone, upsertCustomer } from '../lib/customers'
+import { api, isRemoteSyncEnabled } from '../api'
 import { inr, qtyLabel, stockQtyOfLine, typeLabel } from '../lib/format'
 import { allocateDiscountAndGst, normalizeGstSettings, round2 } from '../lib/gst'
 import { nextBillNo, uid } from '../lib/ids'
@@ -38,6 +41,8 @@ import {
   type PriceChannel,
   type Product,
   type ProductType,
+  type Customer,
+  type FabricRoll,
   type Sale,
   type SaleItem,
   type SaleLineKind,
@@ -61,16 +66,23 @@ type CartLine = {
   mrp?: number
   lineKind: SaleLineKind
   returnOfSaleItemId?: string
+  fabricRollId?: string
+  fabricWidth?: string
 }
 
-function availableStock(p: Product, size?: string, colour?: string) {
+function availableStock(p: Product, size?: string, colour?: string, roll?: FabricRoll | null) {
   if (p.type === 'garment') {
     const v = findVariant(p.sizes, colour, size)
     if (v) return Number(v.quantity || 0)
     const s = p.sizes?.find((x) => x.size === size)
     return Number(s?.quantity || 0)
   }
+  if (p.type === 'fabric' && roll) return Number(roll.remainingMetres || 0)
   return Number(p.quantity || 0)
+}
+
+function isRemnant(roll: FabricRoll) {
+  return Number(roll.remainingMetres) > 0 && Number(roll.remainingMetres) <= Number(roll.remnantThreshold || 3)
 }
 
 export function POS() {
@@ -82,6 +94,10 @@ export function POS() {
   const allSaleItems = useLiveQuery(() => db.saleItems.toArray(), []) || []
   const held = useLiveQuery(() => db.heldBills.orderBy('createdAt').reverse().toArray(), []) || []
   const store = useLiveQuery(() => db.store.get('store-1'), []) as StoreProfile | undefined
+  const fabricRolls =
+    useLiveQuery(() => db.fabricRolls.filter((r) => !r.deletedAt && Number(r.remainingMetres) > 0).toArray(), []) ||
+    []
+  const customers = useLiveQuery(() => db.customers.filter((c) => !c.deletedAt).toArray(), []) || []
   const searchRef = useRef<HTMLInputElement>(null)
 
   const [q, setQ] = useState('')
@@ -102,7 +118,14 @@ export function POS() {
   const [pickSize, setPickSize] = useState('')
   const [pickQty, setPickQty] = useState('1')
   const [pickShade, setPickShade] = useState('')
+  const [pickRollId, setPickRollId] = useState('')
   const [pickUnit, setPickUnit] = useState<'metre' | 'cm'>('metre')
+  const [customerId, setCustomerId] = useState<string | null>(null)
+  const [customerName, setCustomerName] = useState('')
+  const [creditAmount, setCreditAmount] = useState('')
+  const [rzOrderId, setRzOrderId] = useState('')
+  const [voidSaleId, setVoidSaleId] = useState<string | null>(null)
+  const [voidReason, setVoidReason] = useState('')
   const [done, setDone] = useState<{ sale: Sale; items: SaleItem[] } | null>(null)
   const [err, setErr] = useState('')
   const [wholesaleMode, setWholesaleMode] = useState(false)
@@ -204,6 +227,9 @@ export function POS() {
     setPick(p)
     setPickQty(p.type === 'fabric' ? '' : '1')
     setPickShade(p.shade || '')
+    const rollsFor = fabricRolls.filter((r) => r.productId === p.id)
+    setPickRollId(rollsFor[0]?.id || '')
+    if (rollsFor[0]?.shade) setPickShade(rollsFor[0].shade)
     setPickUnit((p.fabricSellUnit as 'metre' | 'cm') || 'metre')
     if (p.type === 'garment') {
       const cols = coloursOf(p.sizes || [])
@@ -342,9 +368,12 @@ export function POS() {
       setErr('Size is required for garments')
       return
     }
-    // saree / fabric: no size forced
     let unit = 'piece'
     let stockNeed = qty
+    const selectedRoll =
+      pick.type === 'fabric' && pickRollId
+        ? fabricRolls.find((r) => r.id === pickRollId) || null
+        : null
     if (pick.type === 'fabric') {
       unit = 'metre'
       stockNeed = pickUnit === 'cm' ? qty / 100 : qty
@@ -353,18 +382,19 @@ export function POS() {
     const size = pick.type === 'garment' ? pickSize : undefined
     const colour = pick.type === 'garment' ? normalizeColour(pickColour) : DEFAULT_COLOUR
     const variant = pick.type === 'garment' ? findVariant(pick.sizes, colour, size) : undefined
-    const avail = availableStock(pick, size, colour)
+    const avail = availableStock(pick, size, colour, selectedRoll)
     const already = cart
       .filter(
         (c) =>
           c.lineKind === 'sale' &&
           c.productId === pick.id &&
           c.size === size &&
-          normalizeColour(c.colour) === colour,
+          normalizeColour(c.colour) === colour &&
+          (c.fabricRollId || '') === (selectedRoll?.id || ''),
       )
       .reduce((a, c) => a + stockQtyOfLine(c.unit, c.quantity), 0)
     if (avail - already + 1e-9 < stockNeed) {
-      setErr(`Not enough stock (available ${avail})`)
+      setErr(`Not enough stock (available ${avail}${selectedRoll ? ' m on roll' : ''})`)
       return
     }
     const prices = normalizeProductPrices(pick as unknown as Record<string, unknown>)
@@ -377,7 +407,8 @@ export function POS() {
       pick.type === 'fabric'
         ? round2(stockNeed * rate)
         : round2(billQty * rate)
-    const key = `${pick.id}-${colour}-${size || ''}-${unit}-sale`
+    const rollShade = selectedRoll?.shade || pickShade || pick.shade || undefined
+    const key = `${pick.id}-${colour}-${size || ''}-${unit}-${selectedRoll?.id || ''}-sale`
     setCart((prev) => {
       const i = prev.findIndex((x) => x.key === key)
       if (i >= 0) {
@@ -401,14 +432,16 @@ export function POS() {
           sku: variant?.variantSku || pick.sku,
           size,
           colour,
-          shade: pick.type === 'fabric' ? pickShade || pick.shade || undefined : undefined,
-          barcode: variant?.barcode || undefined,
+          shade: pick.type === 'fabric' ? rollShade : undefined,
+          barcode: variant?.barcode || selectedRoll?.barcode || undefined,
           quantity: billQty,
           unit,
           rate,
           lineTotal,
           mrp: prices.mrp,
           lineKind: 'sale',
+          fabricRollId: selectedRoll?.id,
+          fabricWidth: selectedRoll?.width || pick.fabricWidth || undefined,
         },
       ]
     })
@@ -448,8 +481,12 @@ export function POS() {
         return
       }
     }
-    if ((mode === 'upi' || (mode === 'split' && (Number(upi) || 0) > 0)) && !upiRef.trim()) {
+    if ((mode === 'upi' || (mode === 'split' && (Number(upi) || 0) > 0)) && !upiRef.trim() && !rzOrderId) {
       setErr('Enter UPI UTR / reference to confirm payment')
+      return
+    }
+    if (mode === 'credit' && !phone.trim() && !customerId) {
+      setErr('Attach customer phone for udhaar / credit sale')
       return
     }
     if (wholesaleMode && !isOwner) {
@@ -484,8 +521,30 @@ export function POS() {
         sgstAmount: g.sgstAmount,
         lineKind: c.lineKind,
         returnOfSaleItemId: c.returnOfSaleItemId,
+        fabricRollId: c.fabricRollId,
+        fabricWidth: c.fabricWidth,
       }
     })
+    let linkedCustomerId = customerId
+    if ((mode === 'credit' || phone.trim()) && phone.trim()) {
+      const existing = customerId
+        ? customers.find((c) => c.id === customerId)
+        : await findCustomerByPhone(phone)
+      const cust = existing
+        ? existing
+        : await upsertCustomer({
+            phone: phone.trim(),
+            name: customerName.trim() || phone.trim(),
+            gstin: customerGstin.trim(),
+          })
+      linkedCustomerId = cust.id
+    }
+    const creditAmt =
+      mode === 'credit'
+        ? grand
+        : mode === 'split'
+          ? Number(creditAmount) || 0
+          : 0
     const sale: Sale = {
       id,
       billNo,
@@ -504,36 +563,77 @@ export function POS() {
       notes: exchangeReason ? `Exchange: ${exchangeReason}` : '',
       createdAt: datetime,
       priceChannel,
-      upiRef: upiRef.trim(),
+      upiRef: upiRef.trim() || rzOrderId,
       taxableTotal: round2(taxableTotal),
       gstTotal: round2(gstTotal),
       exchangeOfSaleId: exchangeSale?.id || null,
+      customerId: linkedCustomerId || null,
+      creditAmount: creditAmt,
     }
 
     await db.transaction(
       'rw',
-      [db.sales, db.saleItems, db.products, db.productSizes, db.outbox, db.stockLedger, db.returns, db.returnItems],
+      [
+        db.sales,
+        db.saleItems,
+        db.products,
+        db.productSizes,
+        db.outbox,
+        db.stockLedger,
+        db.returns,
+        db.returnItems,
+        db.fabricRolls,
+        db.customers,
+        db.auditLog,
+      ],
       async () => {
         await db.sales.add(sale)
         await db.saleItems.bulkAdd(items)
         for (const it of items) {
           const kind = it.lineKind || 'sale'
           const absQty = Math.abs(it.quantity)
-          await applyLocalStockDelta({
-            productId: it.productId,
-            productType: it.productType,
-            colour: it.colour,
-            size: it.size,
-            unit: it.unit,
-            quantity: absQty,
-            direction: kind === 'return' ? 1 : -1,
-            reason: kind === 'return' ? 'return' : 'sale',
-            refType: 'sale',
-            refId: sale.id,
+          if (it.fabricRollId && kind === 'sale' && it.productType === 'fabric') {
+            const metres = it.unit === 'cm' ? absQty / 100 : absQty
+            await consumeFabricRoll({ rollId: it.fabricRollId, metres, refType: 'sale', refId: sale.id })
+          } else {
+            await applyLocalStockDelta({
+              productId: it.productId,
+              productType: it.productType,
+              colour: it.colour,
+              size: it.size,
+              unit: it.unit,
+              quantity: absQty,
+              direction: kind === 'return' ? 1 : -1,
+              reason: kind === 'return' ? 'return' : 'sale',
+              refType: 'sale',
+              refId: sale.id,
+            })
+          }
+        }
+        if (linkedCustomerId && creditAmt > 0) {
+          await applyCreditSale(linkedCustomerId, creditAmt, sale.id)
+          await writeAudit({
+            action: 'credit_sale',
+            entityType: 'sale',
+            entityId: sale.id,
+            userId: user?.id,
+            userName: user?.name,
+            detail: { creditAmt, customerId: linkedCustomerId, billNo },
           })
         }
-        // Exchange return lines already restock via applyLocalStockDelta + server createSale.
-        // Only mark the original bill; avoid a second return sync that would double-restock.
+        if (disc > 0) {
+          const maxAbs = Number(store?.maxCashierDiscount ?? 100)
+          if (disc >= maxAbs || disc >= grand * 0.1) {
+            await writeAudit({
+              action: 'discount',
+              entityType: 'sale',
+              entityId: sale.id,
+              userId: user?.id,
+              userName: user?.name,
+              detail: { discount: disc, grandTotal: grand, billNo },
+            })
+          }
+        }
         if (exchangeSale) {
           await db.sales.update(exchangeSale.id, { status: 'partial_return' })
         }
@@ -545,11 +645,15 @@ export function POS() {
     setDiscount('')
     setPhone('')
     setCustomerGstin('')
+    setCustomerId(null)
+    setCustomerName('')
+    setCreditAmount('')
     setCash('')
     setUpi('')
     setCard('')
     setCashTendered('')
     setUpiRef('')
+    setRzOrderId('')
     setExchangeSale(null)
     setExchangeReason('')
     setDone({ sale, items })
@@ -883,12 +987,47 @@ export function POS() {
         )}
       </label>
       <label className="mt-2 block">
-        <span className="lf-label">Customer phone (optional)</span>
-        <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" className="lf-input" />
+        <span className="lf-label">Customer phone {mode === 'credit' ? '(required for udhaar)' : '(optional)'}</span>
+        <input
+          value={phone}
+          onChange={(e) => {
+            const v = e.target.value
+            setPhone(v)
+            const hit = customers.find((c) => c.phone === v.trim())
+            if (hit) {
+              setCustomerId(hit.id)
+              setCustomerName(hit.name)
+              setCustomerGstin(hit.gstin || '')
+            } else {
+              setCustomerId(null)
+            }
+          }}
+          inputMode="tel"
+          className="lf-input"
+          list="lf-customer-phones"
+        />
+        <datalist id="lf-customer-phones">
+          {customers.map((c) => (
+            <option key={c.id} value={c.phone}>
+              {c.name}
+            </option>
+          ))}
+        </datalist>
       </label>
-      {wholesaleMode && (
+      {(mode === 'credit' || customerId) && (
         <label className="mt-2 block">
-          <span className="lf-label">Customer GSTIN (wholesale)</span>
+          <span className="lf-label">Customer name</span>
+          <input
+            value={customerName}
+            onChange={(e) => setCustomerName(e.target.value)}
+            className="lf-input"
+            placeholder="Name for ledger"
+          />
+        </label>
+      )}
+      {(wholesaleMode || mode === 'credit') && (
+        <label className="mt-2 block">
+          <span className="lf-label">Customer GSTIN (optional)</span>
           <input
             value={customerGstin}
             onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
@@ -896,6 +1035,12 @@ export function POS() {
             placeholder="22AAAAA0000A1Z5"
           />
         </label>
+      )}
+      {mode === 'credit' && (
+        <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Full bill will be posted as udhaar
+          {customerId ? ` · balance now ${customers.find((c) => c.id === customerId)?.balance ?? 0}` : ''}
+        </div>
       )}
       <div className="mt-3 rounded-2xl bg-brand-800 px-3 py-2.5 text-white">
         <div className="flex items-center justify-between">
@@ -908,8 +1053,8 @@ export function POS() {
           </div>
         )}
       </div>
-      <div className="mt-2 grid grid-cols-3 gap-1.5">
-        {(['cash', 'upi', 'split'] as PaymentMode[]).map((m) => (
+      <div className="mt-2 grid grid-cols-4 gap-1.5">
+        {(['cash', 'upi', 'credit', 'split'] as PaymentMode[]).map((m) => (
           <button
             key={m}
             type="button"
@@ -918,7 +1063,7 @@ export function POS() {
               mode === m ? 'bg-brand-600 text-white shadow-soft' : 'bg-brand-50 text-brand-800 hover:bg-brand-100'
             }`}
           >
-            {m}
+            {m === 'credit' ? 'udhaar' : m}
           </button>
         ))}
       </div>
@@ -964,13 +1109,120 @@ export function POS() {
             value={upiRef}
             onChange={(e) => setUpiRef(e.target.value)}
           />
+          {store?.razorpayKeyId ? (
+            <button
+              type="button"
+              className="lf-btn-secondary mt-2 w-full text-sm"
+              onClick={() => {
+                void (async () => {
+                  try {
+                    if (!isRemoteSyncEnabled()) {
+                      setErr('Razorpay intent needs Cloud/LAN sync server')
+                      return
+                    }
+                    const res = await api<{ orderId: string; keyId: string }>('/api/payments/razorpay/create-order', {
+                      method: 'POST',
+                      body: JSON.stringify({ amount: upiDue, receipt: `pos-${Date.now()}` }),
+                    })
+                    setRzOrderId(String(res.orderId || ''))
+                    setUpiRef(String(res.orderId || ''))
+                    setErr('')
+                  } catch (e) {
+                    setErr(e instanceof Error ? e.message : 'Razorpay unavailable — use static QR + UTR')
+                  }
+                })()
+              }}
+            >
+              {rzOrderId ? `Razorpay order ${rzOrderId}` : 'Create Razorpay UPI intent'}
+            </button>
+          ) : null}
         </div>
       )}
       <button type="button" onClick={() => void checkout()} className="lf-btn-primary mt-3 min-h-[52px] w-full text-base">
-        Pay {inr(grand)}
+        {mode === 'credit' ? `Udhaar ${inr(grand)}` : `Pay ${inr(grand)}`}
       </button>
     </aside>
   )
+
+
+  async function softVoidSale() {
+    if (!done || !isOwner) return
+    const reason = voidReason.trim() || window.prompt('Void reason (required)') || ''
+    if (!reason.trim()) return
+    const sale = done.sale
+    const items = done.items
+    const t = new Date().toISOString()
+    await db.transaction(
+      'rw',
+      [db.sales, db.products, db.productSizes, db.fabricRolls, db.customers, db.stockLedger, db.outbox, db.auditLog],
+      async () => {
+        for (const it of items) {
+          if ((it.lineKind || 'sale') === 'return') continue
+          const absQty = Math.abs(it.quantity)
+          if (it.fabricRollId && it.productType === 'fabric') {
+            const metres = it.unit === 'cm' ? absQty / 100 : absQty
+            const roll = await db.fabricRolls.get(it.fabricRollId)
+            if (roll) {
+              await db.fabricRolls.update(roll.id, {
+                remainingMetres: Number(roll.remainingMetres) + metres,
+                updatedAt: t,
+              })
+            }
+            const prod = await db.products.get(it.productId)
+            if (prod) {
+              await db.products.update(it.productId, {
+                quantity: Number(prod.quantity) + metres,
+                updatedAt: t,
+              })
+            }
+          } else {
+            await applyLocalStockDelta({
+              productId: it.productId,
+              productType: it.productType,
+              colour: it.colour,
+              size: it.size,
+              unit: it.unit,
+              quantity: absQty,
+              direction: 1,
+              reason: 'adjust',
+              refType: 'void',
+              refId: sale.id,
+            })
+          }
+        }
+        const credit = Number(sale.creditAmount || 0)
+        if (sale.customerId && credit > 0) {
+          const c = await db.customers.get(sale.customerId)
+          if (c) {
+            const balance = Math.round((Number(c.balance) - credit) * 100) / 100
+            await db.customers.update(c.id, { balance, updatedAt: t })
+            await enqueue('customer', { ...c, balance, updatedAt: t }, c.id)
+          }
+        }
+        const voided = {
+          ...sale,
+          status: 'voided' as const,
+          voidReason: reason,
+          voidedAt: t,
+          voidedBy: user?.id || null,
+        }
+        await db.sales.put(voided)
+        await writeAudit({
+          action: 'void',
+          entityType: 'sale',
+          entityId: sale.id,
+          userId: user?.id,
+          userName: user?.name,
+          detail: { reason, billNo: sale.billNo, grandTotal: sale.grandTotal },
+        })
+        await enqueue('sale', { ...voided, items }, sale.id)
+      },
+    )
+    void flushOutbox()
+    setDone(null)
+    setVoidReason('')
+  }
+
 
   return (
     <div>
@@ -1111,16 +1363,64 @@ export function POS() {
             {pick.type === 'fabric' && (
               <div className="mb-3 space-y-3">
                 <div className="text-sm text-slate-600">Stock {pick.quantity} m available</div>
-                <label className="block text-sm">
-                  Shade (optional)
-                  <input
-                    className="lf-input"
-                    value={pickShade}
-                    onChange={(e) => setPickShade(e.target.value)}
-                    placeholder="e.g. 243"
-                  />
-                </label>
-                <MetreKeypad value={pickQty} onChange={setPickQty} unitLabel="MTR" />
+                {(() => {
+                  const rolls = fabricRolls.filter((r) => r.productId === pick.id)
+                  if (!rolls.length) {
+                    return (
+                      <label className="block text-sm">
+                        Shade (optional)
+                        <input
+                          className="lf-input"
+                          value={pickShade}
+                          onChange={(e) => setPickShade(e.target.value)}
+                          placeholder="e.g. 243"
+                        />
+                      </label>
+                    )
+                  }
+                  return (
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase text-slate-500">Select roll / shade</div>
+                      <div className="max-h-40 space-y-1 overflow-auto">
+                        {rolls.map((r) => (
+                          <button
+                            key={r.id}
+                            type="button"
+                            onClick={() => {
+                              setPickRollId(r.id)
+                              setPickShade(r.shade || '')
+                            }}
+                            className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left text-sm ${
+                              pickRollId === r.id
+                                ? 'border-brand-500 bg-brand-50'
+                                : 'border-brand-100 bg-white'
+                            }`}
+                          >
+                            <span>
+                              {r.shade || 'No shade'} · {r.width}&quot;
+                              {r.lot ? ` · Lot ${r.lot}` : ''}
+                              {isRemnant(r) ? (
+                                <span className="ml-2 rounded bg-amber-100 px-1.5 text-[10px] font-bold text-amber-800">
+                                  REMNANT
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="font-mono font-semibold">{r.remainingMetres} m</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })()}
+                <MetreKeypad
+                  value={pickQty}
+                  onChange={setPickQty}
+                  unitLabel={
+                    pickRollId
+                      ? `MTR · ${(fabricRolls.find((r) => r.id === pickRollId)?.shade || pickShade || 'roll').slice(0, 12)}`
+                      : 'MTR'
+                  }
+                />
               </div>
             )}
             {pick.type === 'saree' && (
@@ -1274,6 +1574,23 @@ export function POS() {
                 New sale
               </button>
             </div>
+            {isOwner && done.sale.status !== 'voided' && (
+              <div className="mt-2 print:hidden">
+                <input
+                  className="lf-input mb-2"
+                  placeholder="Void reason"
+                  value={voidReason}
+                  onChange={(e) => setVoidReason(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="w-full rounded-xl border border-red-200 bg-red-50 py-2 text-sm font-semibold text-red-700"
+                  onClick={() => void softVoidSale()}
+                >
+                  Soft void bill (restock)
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

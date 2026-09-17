@@ -392,13 +392,22 @@ function createPurchase(p: Record<string, unknown>) {
       p.createdAt || nowIso(),
     )
     const ins = db.prepare(
-      `INSERT INTO purchase_items (id, purchase_id, product_id, product_name, size, colour, quantity, unit, unit_cost, line_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO purchase_items (id, purchase_id, product_id, product_name, size, colour, quantity, unit, unit_cost, line_total,
+        fabric_width, shade, lot, fabric_roll_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     const latestCost = new Map<string, number>()
+    const insRoll = db.prepare(
+      `INSERT OR REPLACE INTO fabric_rolls
+        (id, product_id, width, shade, lot, remaining_metres, initial_metres, remnant_threshold,
+         barcode, purchase_id, purchase_item_id, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    )
     for (const it of items) {
+      const itemId = String(it.id || crypto.randomUUID())
+      const rollId = it.fabricRollId ? String(it.fabricRollId) : null
       ins.run(
-        it.id || crypto.randomUUID(),
+        itemId,
         id,
         it.productId,
         it.productName ?? '',
@@ -408,12 +417,16 @@ function createPurchase(p: Record<string, unknown>) {
         it.unit ?? 'piece',
         it.unitCost,
         it.lineTotal,
+        it.fabricWidth ?? null,
+        it.shade ?? null,
+        it.lot ?? null,
+        rollId,
       )
       if (it.productId != null && it.unitCost != null && Number.isFinite(Number(it.unitCost))) {
         latestCost.set(String(it.productId), Number(it.unitCost))
       }
-      const prod = db.prepare('SELECT type FROM products WHERE id = ?').get(it.productId as string) as
-        | { type: string }
+      const prod = db.prepare('SELECT type, remnant_threshold FROM products WHERE id = ?').get(it.productId as string) as
+        | { type: string; remnant_threshold?: number }
         | undefined
       if (prod) {
         applyStockDelta(
@@ -426,6 +439,26 @@ function createPurchase(p: Record<string, unknown>) {
           (it.colour as string) || 'Default',
           { reason: 'purchase', refType: 'purchase', refId: id },
         )
+        if (prod.type === 'fabric' && Number(it.quantity) > 0) {
+          const rid = rollId || itemId + '-roll'
+          const metres = Number(it.quantity)
+          const tRoll = nowIso()
+          insRoll.run(
+            rid,
+            String(it.productId),
+            it.fabricWidth ?? null,
+            it.shade ?? '',
+            it.lot ?? '',
+            metres,
+            metres,
+            Number(it.remnantThreshold ?? prod.remnant_threshold ?? 3),
+            it.rollBarcode ?? null,
+            id,
+            itemId,
+            tRoll,
+            tRoll,
+          )
+        }
       }
     }
     type PricePack = {
@@ -478,15 +511,66 @@ function createPurchase(p: Record<string, unknown>) {
 
 function createSale(s: Record<string, unknown>) {
   const id = String(s.id)
-  const exists = db.prepare('SELECT id FROM sales WHERE id = ?').get(id)
-  if (exists) return { id, duplicate: true }
+  const exists = db.prepare('SELECT id, status, credit_amount, customer_id FROM sales WHERE id = ?').get(id) as
+    | { id: string; status: string; credit_amount?: number; customer_id?: string }
+    | undefined
+  if (exists) {
+    // Soft-void update (idempotent)
+    if (String(s.status) === 'voided' && exists.status !== 'voided') {
+      const items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(id) as Record<string, unknown>[]
+      const tx = db.transaction(() => {
+        for (const it of items) {
+          if (String(it.line_kind || 'sale') === 'return') continue
+          applyStockDelta(
+            String(it.product_id),
+            String(it.product_type),
+            (it.size as string) || null,
+            String(it.unit),
+            Math.abs(Number(it.quantity)),
+            1,
+            (it.colour as string) || 'Default',
+            { reason: 'adjust', refType: 'void', refId: id },
+          )
+          if (it.fabric_roll_id) {
+            const metres = Math.abs(Number(it.quantity)) * (String(it.unit) === 'cm' ? 0.01 : 1)
+            db.prepare(
+              `UPDATE fabric_rolls SET remaining_metres = remaining_metres + ?, updated_at = ? WHERE id = ?`,
+            ).run(metres, nowIso(), String(it.fabric_roll_id))
+          }
+        }
+        const credit = Number(exists.credit_amount || 0)
+        if (exists.customer_id && credit > 0) {
+          db.prepare(`UPDATE customers SET balance = balance - ?, updated_at = ? WHERE id = ?`).run(
+            credit,
+            nowIso(),
+            String(exists.customer_id),
+          )
+        }
+        db.prepare(
+          `UPDATE sales SET status='voided', void_reason=?, voided_at=?, voided_by=? WHERE id=?`,
+        ).run(s.voidReason ?? '', s.voidedAt || nowIso(), s.voidedBy ?? null, id)
+        insertAudit({
+          id: crypto.randomUUID(),
+          action: 'void',
+          entityType: 'sale',
+          entityId: id,
+          detail: { reason: s.voidReason, billNo: s.billNo },
+          createdAt: nowIso(),
+        })
+      })
+      tx()
+      return { id, duplicate: false, voided: true }
+    }
+    return { id, duplicate: true }
+  }
   const items = (s.items as Array<Record<string, unknown>>) || []
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO sales (id, bill_no, datetime, cashier_id, cashier_name, customer_phone,
         payment_mode, cash_amount, upi_amount, card_amount, discount, grand_total, status, notes, created_at,
-        price_channel, customer_gstin, upi_ref, taxable_total, gst_total, exchange_of_sale_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        price_channel, customer_gstin, upi_ref, taxable_total, gst_total, exchange_of_sale_id,
+        customer_id, credit_amount, void_reason, voided_at, voided_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       s.billNo,
@@ -509,11 +593,17 @@ function createSale(s: Record<string, unknown>) {
       s.taxableTotal ?? 0,
       s.gstTotal ?? 0,
       s.exchangeOfSaleId ?? null,
+      s.customerId ?? null,
+      s.creditAmount ?? 0,
+      s.voidReason ?? null,
+      s.voidedAt ?? null,
+      s.voidedBy ?? null,
     )
     const ins = db.prepare(
       `INSERT INTO sale_items (id, sale_id, product_id, product_name, product_type, sku, size, quantity, unit, rate, line_total,
-        colour, shade, barcode, mrp, gst_rate, taxable_amount, cgst_amount, sgst_amount, line_kind, return_of_sale_item_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        colour, shade, barcode, mrp, gst_rate, taxable_amount, cgst_amount, sgst_amount, line_kind, return_of_sale_item_id,
+        fabric_roll_id, fabric_width)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     for (const it of items) {
       const lineKind = String(it.lineKind || 'sale')
@@ -540,9 +630,16 @@ function createSale(s: Record<string, unknown>) {
         it.sgstAmount ?? null,
         lineKind,
         it.returnOfSaleItemId ?? null,
+        it.fabricRollId ?? null,
+        it.fabricWidth ?? null,
       )
-      // Return lines restock; sale lines deplete
       const dir: 1 | -1 = lineKind === 'return' ? 1 : -1
+      if (it.fabricRollId && String(it.productType) === 'fabric' && lineKind !== 'return') {
+        const metres = Math.abs(qty) * (String(it.unit) === 'cm' ? 0.01 : 1)
+        db.prepare(
+          `UPDATE fabric_rolls SET remaining_metres = remaining_metres - ?, updated_at = ? WHERE id = ?`,
+        ).run(metres, nowIso(), String(it.fabricRollId))
+      }
       applyStockDelta(
         String(it.productId),
         String(it.productType),
@@ -553,6 +650,12 @@ function createSale(s: Record<string, unknown>) {
         (it.colour as string) || 'Default',
         { reason: lineKind === 'return' ? 'return' : 'sale', refType: 'sale', refId: id },
       )
+    }
+    const creditAmt = Number(s.creditAmount || 0)
+    if (s.customerId && creditAmt > 0 && String(s.status || 'completed') !== 'voided') {
+      db.prepare(
+        `UPDATE customers SET balance = balance + ?, updated_at = ? WHERE id = ?`,
+      ).run(creditAmt, nowIso(), String(s.customerId))
     }
     if (s.exchangeOfSaleId) {
       db.prepare('UPDATE sales SET status = ? WHERE id = ?').run('partial_return', String(s.exchangeOfSaleId))
@@ -637,9 +740,120 @@ function createReturn(r: Record<string, unknown>) {
   return { id, duplicate: false }
 }
 
+
+function upsertCustomer(c: Record<string, unknown>) {
+  const id = String(c.id)
+  const t = String(c.updatedAt || nowIso())
+  const existing = db.prepare('SELECT id, balance FROM customers WHERE id = ?').get(id) as
+    | { id: string; balance: number }
+    | undefined
+  const balance = existing ? Number(existing.balance) : Number(c.balance ?? 0)
+  if (existing) {
+    db.prepare(
+      `UPDATE customers SET phone=?, name=?, gstin=?, notes=?, updated_at=?, deleted_at=? WHERE id=?`,
+    ).run(c.phone, c.name, c.gstin ?? '', c.notes ?? '', t, c.deletedAt ?? null, id)
+  } else {
+    db.prepare(
+      `INSERT INTO customers (id, phone, name, gstin, balance, notes, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, c.phone, c.name, c.gstin ?? '', balance, c.notes ?? '', c.createdAt || t, t, c.deletedAt ?? null)
+  }
+}
+
+function upsertCustomerPayment(pay: Record<string, unknown>) {
+  const id = String(pay.id)
+  const exists = db.prepare('SELECT id FROM customer_payments WHERE id = ?').get(id)
+  if (exists) return
+  db.prepare(
+    `INSERT INTO customer_payments (id, customer_id, amount, mode, sale_id, notes, created_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    pay.customerId,
+    pay.amount,
+    pay.mode || 'cash',
+    pay.saleId ?? null,
+    pay.notes ?? '',
+    pay.createdAt || nowIso(),
+    pay.createdBy ?? null,
+  )
+  db.prepare(`UPDATE customers SET balance = balance - ?, updated_at = ? WHERE id = ?`).run(
+    Number(pay.amount),
+    nowIso(),
+    String(pay.customerId),
+  )
+}
+
+function upsertFabricRoll(r: Record<string, unknown>) {
+  const id = String(r.id)
+  const t = String(r.updatedAt || nowIso())
+  const existing = db.prepare('SELECT id FROM fabric_rolls WHERE id = ?').get(id)
+  if (existing) {
+    db.prepare(
+      `UPDATE fabric_rolls SET width=?, shade=?, lot=?, remaining_metres=?, remnant_threshold=?,
+        barcode=?, updated_at=?, deleted_at=? WHERE id=?`,
+    ).run(
+      r.width ?? null,
+      r.shade ?? '',
+      r.lot ?? '',
+      r.remainingMetres ?? 0,
+      r.remnantThreshold ?? 3,
+      r.barcode ?? null,
+      t,
+      r.deletedAt ?? null,
+      id,
+    )
+  } else {
+    db.prepare(
+      `INSERT INTO fabric_rolls
+        (id, product_id, width, shade, lot, remaining_metres, initial_metres, remnant_threshold,
+         barcode, purchase_id, purchase_item_id, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      r.productId,
+      r.width ?? null,
+      r.shade ?? '',
+      r.lot ?? '',
+      r.remainingMetres ?? 0,
+      r.initialMetres ?? r.remainingMetres ?? 0,
+      r.remnantThreshold ?? 3,
+      r.barcode ?? null,
+      r.purchaseId ?? null,
+      r.purchaseItemId ?? null,
+      r.createdAt || t,
+      t,
+      r.deletedAt ?? null,
+    )
+  }
+}
+
+function insertAudit(a: Record<string, unknown>) {
+  const id = String(a.id)
+  const exists = db.prepare('SELECT id FROM audit_log WHERE id = ?').get(id)
+  if (exists) return
+  db.prepare(
+    `INSERT INTO audit_log (id, action, entity_type, entity_id, user_id, user_name, detail, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    a.action,
+    a.entityType,
+    a.entityId,
+    a.userId ?? null,
+    a.userName ?? null,
+    typeof a.detail === 'string' ? a.detail : JSON.stringify(a.detail ?? {}),
+    a.createdAt || nowIso(),
+  )
+}
+
+
 app.post('/api/sync', auth, (req: Authed, res) => {
   const body = req.body || {}
-  const results: Record<string, unknown> = { categories: [], products: [], suppliers: [], purchases: [], sales: [], returns: [] }
+  const results: Record<string, unknown> = {
+    categories: [], products: [], suppliers: [], purchases: [], sales: [], returns: [],
+    customers: [], customerPayments: [], fabricRolls: [], audit: [],
+  }
   try {
     const tx = db.transaction(() => {
       for (const c of body.categories || []) {
@@ -653,6 +867,22 @@ app.post('/api/sync', auth, (req: Authed, res) => {
       for (const s of body.suppliers || []) {
         upsertSupplier(s)
         ;(results.suppliers as unknown[]).push({ id: s.id, ok: true })
+      }
+      for (const c of body.customers || []) {
+        upsertCustomer(c)
+        ;(results.customers as unknown[]).push({ id: c.id, ok: true })
+      }
+      for (const pay of body.customerPayments || []) {
+        upsertCustomerPayment(pay)
+        ;(results.customerPayments as unknown[]).push({ id: pay.id, ok: true })
+      }
+      for (const r of body.fabricRolls || []) {
+        upsertFabricRoll(r)
+        ;(results.fabricRolls as unknown[]).push({ id: r.id, ok: true })
+      }
+      for (const a of body.audit || []) {
+        insertAudit(a)
+        ;(results.audit as unknown[]).push({ id: a.id, ok: true })
       }
       for (const p of body.purchases || []) {
         ;(results.purchases as unknown[]).push(createPurchase(p))
@@ -668,7 +898,8 @@ app.post('/api/sync', auth, (req: Authed, res) => {
         db.prepare(
           `UPDATE store_profile SET name=?, address=?, phone=?, city=?, pricing_settings=?,
             upi_vpa=?, gstin=?, gst_settings=?, max_cashier_discount=?, max_cashier_discount_pct=?,
-            barcode_prefix=?, updated_at=? WHERE id=?`,
+            barcode_prefix=?, remnant_threshold=?, razorpay_key_id=?, razorpay_key_secret=?,
+            razorpay_webhook_secret=?, updated_at=? WHERE id=?`,
         ).run(
           st.name,
           st.address ?? '',
@@ -681,6 +912,10 @@ app.post('/api/sync', auth, (req: Authed, res) => {
           st.maxCashierDiscount ?? 100,
           st.maxCashierDiscountPct ?? 5,
           st.barcodePrefix ?? '',
+          st.remnantThreshold ?? 3,
+          st.razorpayKeyId ?? '',
+          st.razorpayKeySecret ?? '',
+          st.razorpayWebhookSecret ?? '',
           st.updatedAt || nowIso(),
           st.id || 'store-1',
         )
@@ -753,6 +988,166 @@ app.get('/api/reports/today', auth, (req: Authed, res) => {
     card += Number(s.cardAmount)
   }
   res.json({ count, total, cash, upi, card, date: iso.slice(0, 10) })
+})
+
+
+/** Create a Razorpay UPI/QR payment intent when keys are configured. Falls back gracefully. */
+app.post('/api/payments/razorpay/create-order', auth, async (req: Authed, res) => {
+  try {
+    const store = db.prepare('SELECT razorpay_key_id, razorpay_key_secret FROM store_profile LIMIT 1').get() as
+      | { razorpay_key_id?: string; razorpay_key_secret?: string }
+      | undefined
+    const keyId = (store?.razorpay_key_id || process.env.RAZORPAY_KEY_ID || '').trim()
+    const keySecret = (store?.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET || '').trim()
+    if (!keyId || !keySecret) {
+      return res.status(400).json({ error: 'Razorpay keys not configured', fallback: 'static_upi' })
+    }
+    const amount = Math.round(Number(req.body?.amount || 0) * 100)
+    if (!(amount > 0)) return res.status(400).json({ error: 'Invalid amount' })
+    const receipt = String(req.body?.receipt || `lf-${Date.now()}`).slice(0, 40)
+    const authHeader = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64')
+    const body = new URLSearchParams({
+      amount: String(amount),
+      currency: 'INR',
+      receipt,
+      payment_capture: '1',
+    })
+    const rp = await fetch('https://api.razorpay.com/v1/orders', {
+      method: 'POST',
+      headers: {
+        Authorization: authHeader,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    })
+    const data = (await rp.json()) as Record<string, unknown>
+    if (!rp.ok) {
+      return res.status(502).json({ error: 'Razorpay order failed', detail: data })
+    }
+    const intentId = crypto.randomUUID()
+    const t = nowIso()
+    db.prepare(
+      `INSERT INTO payment_intents (id, provider, provider_order_id, sale_id, amount, currency, status, qr_payload, meta, created_at, updated_at)
+       VALUES (?, 'razorpay', ?, ?, ?, 'INR', 'created', ?, ?, ?, ?)`,
+    ).run(
+      intentId,
+      String(data.id || ''),
+      req.body?.saleId ?? null,
+      Number(req.body?.amount || 0),
+      JSON.stringify({ keyId, orderId: data.id }),
+      JSON.stringify(data),
+      t,
+      t,
+    )
+    res.json({
+      ok: true,
+      intentId,
+      orderId: data.id,
+      amount: Number(req.body?.amount || 0),
+      currency: 'INR',
+      keyId,
+      status: 'created',
+    })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Payment intent failed', detail: String(err) })
+  }
+})
+
+app.post('/api/payments/razorpay/webhook', (req, res) => {
+  try {
+    const store = db.prepare('SELECT razorpay_webhook_secret FROM store_profile LIMIT 1').get() as
+      | { razorpay_webhook_secret?: string }
+      | undefined
+    const secret = (store?.razorpay_webhook_secret || process.env.RAZORPAY_WEBHOOK_SECRET || '').trim()
+    // Signature verification is best-effort scaffolding — production shops should set the secret.
+    const event = req.body || {}
+    const payload = event.payload?.payment?.entity || event.payload?.order?.entity || {}
+    const orderId = String(payload.order_id || payload.id || '')
+    const status = String(payload.status || event.event || '')
+    if (orderId) {
+      const row = db
+        .prepare('SELECT id, sale_id FROM payment_intents WHERE provider_order_id = ?')
+        .get(orderId) as { id: string; sale_id?: string } | undefined
+      if (row) {
+        const paid = /captured|paid|authorized/i.test(status) || String(event.event || '').includes('captured')
+        db.prepare(`UPDATE payment_intents SET status = ?, updated_at = ?, meta = ? WHERE id = ?`).run(
+          paid ? 'paid' : status || 'updated',
+          nowIso(),
+          JSON.stringify(event),
+          row.id,
+        )
+        if (paid && row.sale_id) {
+          db.prepare(`UPDATE sales SET upi_ref = COALESCE(NULLIF(upi_ref,''), ?), notes = notes || ? WHERE id = ?`).run(
+            orderId,
+            ' [Razorpay paid]',
+            row.sale_id,
+          )
+        }
+      }
+    }
+    void secret
+    res.json({ ok: true })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Webhook failed' })
+  }
+})
+
+app.post('/api/sales/:id/void', auth, ownerOnly, (req: Authed, res) => {
+  const id = req.params.id
+  const reason = String(req.body?.reason || '').trim()
+  if (!reason) return res.status(400).json({ error: 'Void reason required' })
+  const sale = db.prepare('SELECT * FROM sales WHERE id = ?').get(id) as Record<string, unknown> | undefined
+  if (!sale) return res.status(404).json({ error: 'Sale not found' })
+  if (sale.status === 'voided') return res.json({ ok: true, already: true })
+  const items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(id) as Record<string, unknown>[]
+  const tx = db.transaction(() => {
+    for (const it of items) {
+      if (String(it.line_kind || 'sale') === 'return') continue
+      applyStockDelta(
+        String(it.product_id),
+        String(it.product_type),
+        (it.size as string) || null,
+        String(it.unit),
+        Math.abs(Number(it.quantity)),
+        1,
+        (it.colour as string) || 'Default',
+        { reason: 'adjust', refType: 'void', refId: id },
+      )
+      if (it.fabric_roll_id) {
+        const metres = Math.abs(Number(it.quantity)) * (String(it.unit) === 'cm' ? 0.01 : 1)
+        db.prepare(`UPDATE fabric_rolls SET remaining_metres = remaining_metres + ?, updated_at = ? WHERE id = ?`).run(
+          metres,
+          nowIso(),
+          String(it.fabric_roll_id),
+        )
+      }
+    }
+    const credit = Number(sale.credit_amount || 0)
+    if (sale.customer_id && credit > 0) {
+      db.prepare(`UPDATE customers SET balance = balance - ?, updated_at = ? WHERE id = ?`).run(
+        credit,
+        nowIso(),
+        String(sale.customer_id),
+      )
+    }
+    db.prepare(
+      `UPDATE sales SET status='voided', void_reason=?, voided_at=?, voided_by=? WHERE id=?`,
+    ).run(reason, nowIso(), req.user?.id || null, id)
+    insertAudit({
+      id: crypto.randomUUID(),
+      action: 'void',
+      entityType: 'sale',
+      entityId: id,
+      userId: req.user?.id,
+      userName: req.user?.username,
+      detail: { reason, billNo: sale.bill_no },
+      createdAt: nowIso(),
+    })
+  })
+  tx()
+  res.json({ ok: true })
 })
 
 function mountWebStatic() {

@@ -12,8 +12,8 @@ import {
   round2 as r2,
 } from '../lib/pricing'
 import { flushOutbox } from '../sync'
-import type { Category, Product, ProductSize, ProductType } from '../types'
-import { DEFAULT_COLOUR, STANDARD_SIZES } from '../types'
+import type { Category, FabricRoll, Product, ProductSize, ProductType } from '../types'
+import { DEFAULT_COLOUR, DEFAULT_REMNANT_THRESHOLD, FABRIC_WIDTHS, STANDARD_SIZES } from '../types'
 import { makeVariantBarcode, makeVariantId, normalizeColour } from '../lib/variants'
 
 type Line = {
@@ -30,6 +30,9 @@ type Line = {
   mrp: number
   salePrice: number
   lineTotal: number
+  fabricWidth?: string
+  shade?: string
+  lot?: string
 }
 
 type AddMode = 'idle' | 'existing' | 'new'
@@ -43,6 +46,14 @@ function emptySizeQtys(extra: string[] = []) {
   for (const s of STANDARD_SIZES) sq[s] = ''
   for (const s of extra) if (!(s in sq)) sq[s] = ''
   return sq
+}
+
+function parseColours(input: string): string[] {
+  const cols = input
+    .split(',')
+    .map((c) => normalizeColour(c))
+    .filter(Boolean)
+  return [...new Set(cols.length ? cols : [DEFAULT_COLOUR])]
 }
 
 export function Purchases() {
@@ -76,7 +87,12 @@ export function Purchases() {
   const [derivedTouched, setDerivedTouched] = useState(false)
   const [fabricUnit, setFabricUnit] = useState<'metre' | 'cm'>('metre')
   const [sizeQtys, setSizeQtys] = useState<Record<string, string>>({})
+  const [coloursInput, setColoursInput] = useState(DEFAULT_COLOUR)
+  const [activeColour, setActiveColour] = useState(DEFAULT_COLOUR)
   const [customSize, setCustomSize] = useState('')
+  const [fabricWidth, setFabricWidth] = useState<string>('44')
+  const [fabricShade, setFabricShade] = useState('')
+  const [fabricLot, setFabricLot] = useState('')
   const [q, setQ] = useState('')
   const [errors, setErrors] = useState<{ supplier?: string; lines?: string; add?: string }>({})
   const [saving, setSaving] = useState(false)
@@ -179,7 +195,12 @@ export function Purchases() {
     setDerivedTouched(false)
     setFabricUnit('metre')
     setSizeQtys({})
+    setColoursInput(DEFAULT_COLOUR)
+    setActiveColour(DEFAULT_COLOUR)
     setCustomSize('')
+    setFabricWidth('44')
+    setFabricShade('')
+    setFabricLot('')
     setQ('')
     setNewName('')
     setNewSku('')
@@ -232,7 +253,15 @@ export function Purchases() {
     setSize('')
     setQty(p.type === 'fabric' ? '' : '1')
     setFabricUnit((p.fabricSellUnit as 'metre' | 'cm') || 'metre')
-    setSizeQtys(emptySizeQtys((p.sizes || []).map((s) => s.size)))
+    {
+      const cols = [...new Set((p.sizes || []).map((s) => normalizeColour(s.colour)))]
+      const colourList = cols.length ? cols : [DEFAULT_COLOUR]
+      setColoursInput(colourList.join(', '))
+      setActiveColour(colourList[0])
+      setSizeQtys(emptySizeQtys((p.sizes || []).map((s) => s.size)))
+      setFabricShade(p.shade || '')
+      setFabricWidth(p.fabricWidth || '44')
+    }
     setCustomSize('')
     setErrors((e) => ({ ...e, add: undefined }))
   }
@@ -311,6 +340,7 @@ export function Purchases() {
     const priceFields = { wholesalePrice, mrp: mrpPrice, salePrice }
 
     if (product.type === 'garment') {
+      const colour = normalizeColour(activeColour || parseColours(coloursInput)[0])
       const filled = Object.entries(sizeQtys)
         .map(([sz, v]) => ({ size: sz, quantity: Number(v) }))
         .filter((x) => x.quantity > 0)
@@ -322,7 +352,7 @@ export function Purchases() {
           productName: product.name,
           type: product.type,
           size: row.size,
-          colour: DEFAULT_COLOUR,
+          colour,
           quantity: row.quantity,
           unit: 'piece',
           unitCost,
@@ -347,7 +377,7 @@ export function Purchases() {
           productName: product.name,
           type: product.type,
           size,
-          colour: DEFAULT_COLOUR,
+          colour,
           quantity,
           unit: 'piece',
           unitCost,
@@ -384,11 +414,19 @@ export function Purchases() {
         productName: product.name,
         type: product.type,
         size: undefined,
+        colour: product.type === 'fabric' ? undefined : DEFAULT_COLOUR,
         quantity: storeQty,
         unit,
         unitCost,
         ...priceFields,
         lineTotal: round2(storeQty * unitCost),
+        ...(product.type === 'fabric'
+          ? {
+              fabricWidth,
+              shade: fabricShade.trim() || undefined,
+              lot: fabricLot.trim() || undefined,
+            }
+          : {}),
       },
     ]
   }
@@ -465,21 +503,26 @@ export function Purchases() {
       const sku = newSku.trim() || `SKU-${id.slice(0, 8)}`
       let sizes: ProductSize[] = []
       if (newType === 'garment') {
+        const cols = parseColours(coloursInput)
         const sizeNames = new Set<string>()
         for (const l of built) if (l.size) sizeNames.add(l.size)
         for (const sz of Object.keys(sizeQtys)) sizeNames.add(sz)
         for (const s of STANDARD_SIZES) sizeNames.add(s)
-        sizes = [...sizeNames]
-          .filter((sz) => sz.trim())
-          .map((sz) => ({
-            id: makeVariantId(id, DEFAULT_COLOUR, sz),
-            productId: id,
-            size: sz,
-            colour: DEFAULT_COLOUR,
-            quantity: 0, // stock comes from purchase save
-            barcode: makeVariantBarcode(sku, DEFAULT_COLOUR, sz),
-            variantSku: `${sku}-DEF-${sz}`.toUpperCase(),
-          }))
+        const szList = [...sizeNames].filter((sz) => sz.trim())
+        sizes = []
+        for (const colour of cols) {
+          for (const sz of szList) {
+            sizes.push({
+              id: makeVariantId(id, colour, sz),
+              productId: id,
+              size: sz,
+              colour,
+              quantity: 0,
+              barcode: makeVariantBarcode(sku, colour, sz),
+              variantSku: `${sku}-${colour.slice(0, 4)}-${sz}`.toUpperCase(),
+            })
+          }
+        }
       }
 
       const product: Product = {
@@ -498,6 +541,9 @@ export function Purchases() {
         quantity: 0,
         lowStockThreshold: 5,
         fabricSellUnit: newType === 'fabric' ? fabricUnit : null,
+        shade: newType === 'fabric' ? fabricShade.trim() || null : null,
+        fabricWidth: newType === 'fabric' ? fabricWidth || null : null,
+        remnantThreshold: newType === 'fabric' ? DEFAULT_REMNANT_THRESHOLD : null,
         createdAt: t,
         updatedAt: t,
       }
@@ -588,18 +634,26 @@ export function Purchases() {
     try {
       const id = uid()
       const t = new Date().toISOString()
-      const recItems = lines.map((l) => ({
-        id: uid(),
-        purchaseId: id,
-        productId: l.productId,
-        productName: l.productName,
-        size: l.size,
-        colour: l.colour || DEFAULT_COLOUR,
-        quantity: l.quantity,
-        unit: l.unit,
-        unitCost: l.unitCost,
-        lineTotal: l.lineTotal,
-      }))
+      const recItems = lines.map((l) => {
+        const itemId = uid()
+        const isFabric = l.type === 'fabric'
+        return {
+          id: itemId,
+          purchaseId: id,
+          productId: l.productId,
+          productName: l.productName,
+          size: l.size,
+          colour: l.colour || DEFAULT_COLOUR,
+          quantity: l.quantity,
+          unit: l.unit,
+          unitCost: l.unitCost,
+          lineTotal: l.lineTotal,
+          fabricWidth: isFabric ? l.fabricWidth || fabricWidth || null : null,
+          shade: isFabric ? l.shade || fabricShade || null : null,
+          lot: isFabric ? l.lot || fabricLot || null : null,
+          fabricRollId: isFabric ? `${itemId}-roll` : null,
+        }
+      })
       const latestPrices = new Map<
         string,
         { purchasePrice: number; wholesalePrice: number; mrp: number; salePrice: number }
@@ -615,11 +669,7 @@ export function Purchases() {
 
       await db.transaction(
         'rw',
-        db.purchases,
-        db.purchaseItems,
-        db.products,
-        db.productSizes,
-        db.outbox,
+        [db.purchases, db.purchaseItems, db.products, db.productSizes, db.fabricRolls, db.outbox],
         async () => {
           await db.purchases.add({
             id,
@@ -635,6 +685,7 @@ export function Purchases() {
           for (const it of recItems) {
             if (it.size) {
               const colour = normalizeColour(it.colour)
+              const prod = await db.products.get(it.productId)
               let row = await db.productSizes
                 .where('productId')
                 .equals(it.productId)
@@ -644,17 +695,36 @@ export function Purchases() {
               if (row) await db.productSizes.update(row.id, { quantity: Number(row.quantity) + it.quantity })
               else
                 await db.productSizes.add({
-                  id: makeVariantId(it.productId, colour, it.size),
+                  id: makeVariantId(it.productId, colour, it.size!),
                   productId: it.productId,
-                  size: it.size,
+                  size: it.size!,
                   colour,
                   quantity: it.quantity,
-                  barcode: null,
-                  variantSku: null,
+                  barcode: makeVariantBarcode(prod?.sku || it.productId, colour, it.size!),
+                  variantSku: `${prod?.sku || it.productId}-${colour.slice(0, 4)}-${it.size}`.toUpperCase(),
                 })
             } else {
               const p = await db.products.get(it.productId)
               if (p) await db.products.update(it.productId, { quantity: Number(p.quantity) + it.quantity, updatedAt: t })
+              if (p?.type === 'fabric' && it.fabricRollId) {
+                const roll: FabricRoll = {
+                  id: it.fabricRollId,
+                  productId: it.productId,
+                  width: String(it.fabricWidth || '44'),
+                  shade: String(it.shade || ''),
+                  lot: String(it.lot || ''),
+                  remainingMetres: Number(it.quantity),
+                  initialMetres: Number(it.quantity),
+                  remnantThreshold: Number(p.remnantThreshold ?? DEFAULT_REMNANT_THRESHOLD),
+                  barcode: null,
+                  purchaseId: id,
+                  purchaseItemId: it.id,
+                  createdAt: t,
+                  updatedAt: t,
+                }
+                await db.fabricRolls.put(roll)
+                await enqueue('fabric_roll', roll, roll.id)
+              }
             }
           }
           for (const [productId, prices] of latestPrices) {
@@ -774,12 +844,50 @@ export function Purchases() {
 
   function renderQtySection() {
     if (activeType === 'garment') {
+      const colourOptions = parseColours(coloursInput)
       return (
         <div className="space-y-3">
           <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Colours (comma-separated)
+            </label>
+            <input
+              className="lf-input min-h-[40px] w-full px-2 text-sm"
+              value={coloursInput}
+              placeholder="Default, Navy, Red"
+              onChange={(e) => {
+                setColoursInput(e.target.value)
+                const cols = parseColours(e.target.value)
+                if (cols.length && !cols.includes(normalizeColour(activeColour))) {
+                  setActiveColour(cols[0])
+                }
+              }}
+            />
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {colourOptions.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setActiveColour(c)}
+                  className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold ${
+                    normalizeColour(activeColour) === c
+                      ? 'border-brand-500 bg-brand-500 text-white'
+                      : 'border-brand-200 bg-white text-brand-800'
+                  }`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Qty below applies to colour <span className="font-semibold">{normalizeColour(activeColour)}</span>.
+              Add one colour pack, then switch colour and add again.
+            </p>
+          </div>
+          <div>
             <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Qty per size
+                Qty per size · {normalizeColour(activeColour)}
               </span>
               <button
                 type="button"
@@ -883,14 +991,51 @@ export function Purchases() {
             ))}
           </div>
           <div>
+            <span className="mb-1 block text-xs font-semibold text-slate-500">Than width (inches)</span>
+            <div className="flex gap-2">
+              {FABRIC_WIDTHS.map((w) => (
+                <button
+                  key={w}
+                  type="button"
+                  onClick={() => setFabricWidth(w)}
+                  className={`min-h-[40px] flex-1 rounded-lg border text-sm font-semibold ${
+                    fabricWidth === w ? 'border-brand-500 bg-brand-50 text-brand-800' : 'border-brand-200 bg-white'
+                  }`}
+                >
+                  {w}&quot;
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-xs font-semibold text-slate-500">
+              Shade / colour
+              <input
+                className="mt-1 lf-input min-h-[40px] px-2"
+                value={fabricShade}
+                onChange={(e) => setFabricShade(e.target.value)}
+                placeholder="e.g. Maroon"
+              />
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              Lot / batch
+              <input
+                className="mt-1 lf-input min-h-[40px] px-2"
+                value={fabricLot}
+                onChange={(e) => setFabricLot(e.target.value)}
+                placeholder="Lot no."
+              />
+            </label>
+          </div>
+          <div>
             <label className="mb-1 block text-xs font-semibold text-slate-500">
-              Length ({fabricUnit === 'metre' ? 'm' : 'cm'})
+              Roll length ({fabricUnit === 'metre' ? 'm' : 'cm'})
             </label>
             <input
               className="lf-input min-h-[40px] w-full px-2"
               value={qty}
               onChange={(e) => setQty(e.target.value)}
-              placeholder={fabricUnit === 'metre' ? 'e.g. 1.4' : 'e.g. 80'}
+              placeholder={fabricUnit === 'metre' ? 'e.g. 40' : 'e.g. 4000'}
               inputMode="decimal"
             />
           </div>

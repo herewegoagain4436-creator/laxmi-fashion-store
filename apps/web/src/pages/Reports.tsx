@@ -2,12 +2,17 @@ import { useMemo } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db, productsWithSizes } from '../db'
 import { inr, isLowStock, productStock, todayStartIso, typeLabel } from '../lib/format'
+import { ageingBucket, creditSalesForCustomer } from '../lib/customers'
 import { DEFAULT_COLOUR } from '../types'
+import { Link } from 'react-router-dom'
 
 export function Reports() {
   const sales = useLiveQuery(() => db.sales.toArray(), []) || []
   const saleItems = useLiveQuery(() => db.saleItems.toArray(), []) || []
   const products = useLiveQuery(() => productsWithSizes(), []) || []
+  const customers = useLiveQuery(() => db.customers.filter((c) => !c.deletedAt).toArray(), []) || []
+  const auditLog = useLiveQuery(() => db.auditLog.orderBy('createdAt').reverse().limit(100).toArray(), []) || []
+  const fabricRolls = useLiveQuery(() => db.fabricRolls.filter((r) => !r.deletedAt).toArray(), []) || []
   const start = todayStartIso()
   const today = sales.filter((s) => s.datetime >= start && s.status !== 'returned' && s.status !== 'held')
   const total = today.reduce((a, s) => a + s.grandTotal, 0)
@@ -191,6 +196,107 @@ export function Reports() {
               <tr>
                 <td className="px-3 py-4 text-slate-500" colSpan={4}>
                   None flagged
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+
+      <h2 className="mb-2 mt-6 font-semibold">Udhaar outstanding</h2>
+      <div className="mb-2 text-sm text-slate-600">
+        <Link className="font-semibold text-brand-700 underline" to="/customers">
+          Open customers ledger
+        </Link>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        {(() => {
+          const buckets = { '0-30': 0, '31-60': 0, '60+': 0 }
+          for (const c of customers.filter((x) => Number(x.balance) > 0)) {
+            const oldest = creditSalesForCustomer(sales, c.id).map((s) => s.datetime).sort()[0]
+            buckets[ageingBucket(oldest)] += Number(c.balance)
+          }
+          return (
+            [
+              ['0–30', buckets['0-30']],
+              ['31–60', buckets['31-60']],
+              ['60+', buckets['60+']],
+            ] as const
+          ).map(([k, v]) => (
+            <div key={k} className="rounded-2xl border bg-white p-4">
+              <div className="text-xs uppercase text-slate-500">{k} days</div>
+              <div className="text-xl font-bold">{inr(v)}</div>
+            </div>
+          ))
+        })()}
+      </div>
+
+      <h2 className="mb-2 mt-6 font-semibold">Fabric remnant alerts</h2>
+      <div className="lf-card overflow-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-brand-50">
+            <tr>
+              <th className="px-3 py-2 text-left">Product</th>
+              <th className="px-3 py-2 text-left">Shade / lot</th>
+              <th className="px-3 py-2 text-left">Width</th>
+              <th className="px-3 py-2 text-left">Remaining</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fabricRolls
+              .filter((r) => Number(r.remainingMetres) > 0 && Number(r.remainingMetres) <= Number(r.remnantThreshold || 3))
+              .slice(0, 40)
+              .map((r) => {
+                const prod = products.find((p) => p.id === r.productId)
+                return (
+                  <tr key={r.id} className="border-t">
+                    <td className="px-3 py-2">{prod?.name || r.productId}</td>
+                    <td className="px-3 py-2">
+                      {r.shade || '—'} {r.lot ? `· ${r.lot}` : ''}
+                    </td>
+                    <td className="px-3 py-2">{r.width}&quot;</td>
+                    <td className="px-3 py-2 font-semibold text-amber-700">{r.remainingMetres} m</td>
+                  </tr>
+                )
+              })}
+            {fabricRolls.filter((r) => Number(r.remainingMetres) > 0 && Number(r.remainingMetres) <= Number(r.remnantThreshold || 3)).length === 0 && (
+              <tr>
+                <td className="px-3 py-4 text-slate-500" colSpan={4}>
+                  No remnant rolls
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <h2 className="mb-2 mt-6 font-semibold">Audit log (owner)</h2>
+      <div className="lf-card overflow-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-brand-50">
+            <tr>
+              <th className="px-3 py-2 text-left">When</th>
+              <th className="px-3 py-2 text-left">Action</th>
+              <th className="px-3 py-2 text-left">Who</th>
+              <th className="px-3 py-2 text-left">Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {auditLog.map((a) => (
+              <tr key={a.id} className="border-t align-top">
+                <td className="px-3 py-2 text-xs whitespace-nowrap">
+                  {new Date(a.createdAt).toLocaleString('en-IN')}
+                </td>
+                <td className="px-3 py-2 font-semibold uppercase">{a.action}</td>
+                <td className="px-3 py-2">{a.userName || a.userId || '—'}</td>
+                <td className="px-3 py-2 font-mono text-[11px] text-slate-600 break-all">{a.detail}</td>
+              </tr>
+            ))}
+            {auditLog.length === 0 && (
+              <tr>
+                <td className="px-3 py-4 text-slate-500" colSpan={4}>
+                  No audit events yet (voids, big discounts, credit, returns…)
                 </td>
               </tr>
             )}

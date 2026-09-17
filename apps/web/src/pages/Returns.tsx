@@ -5,6 +5,7 @@ import { db, enqueue } from '../db'
 import { inr, qtyLabel, stockQtyOfLine } from '../lib/format'
 import { uid } from '../lib/ids'
 import { flushOutbox } from '../sync'
+import { writeAudit } from '../lib/audit'
 import type { Sale, SaleItem } from '../types'
 
 export function Returns() {
@@ -62,7 +63,7 @@ export function Returns() {
     }))
     await db.transaction(
       'rw',
-      [db.returns, db.returnItems, db.sales, db.products, db.productSizes, db.outbox],
+      [db.returns, db.returnItems, db.sales, db.products, db.productSizes, db.outbox, db.auditLog],
       async () => {
         await db.returns.add({
           id,
@@ -92,6 +93,14 @@ export function Returns() {
           }
         }
         await db.sales.update(sale.id, { status: 'partial_return' })
+        await writeAudit({
+          action: 'return',
+          entityType: 'return',
+          entityId: id,
+          userId: user?.id,
+          userName: user?.name,
+          detail: { saleId: sale.id, billNo: sale.billNo, refund, reason },
+        })
         await enqueue(
           'return',
           {

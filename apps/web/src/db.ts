@@ -11,8 +11,12 @@ import {
 import { makeVariantBarcode, makeVariantId, normalizeColour, normalizeVariant } from './lib/variants'
 import { normalizeGstSettings } from './lib/gst'
 import type {
+  AuditLogEntry,
   Category,
   CategoryPricingRules,
+  Customer,
+  CustomerPayment,
+  FabricRoll,
   HeldBill,
   OutboxItem,
   Product,
@@ -29,7 +33,7 @@ import type {
   StoreProfile,
   User,
 } from './types'
-import { DEFAULT_COLOUR, DEFAULT_GST_SETTINGS } from './types'
+import { DEFAULT_COLOUR, DEFAULT_GST_SETTINGS, DEFAULT_REMNANT_THRESHOLD } from './types'
 
 export type LocalUser = User & { passwordHash?: string }
 
@@ -76,6 +80,10 @@ export class LaxmiDB extends Dexie {
   meta!: Table<Meta, string>
   heldBills!: Table<HeldBill, string>
   stockLedger!: Table<StockLedgerEntry, string>
+  customers!: Table<Customer, string>
+  customerPayments!: Table<CustomerPayment, string>
+  fabricRolls!: Table<FabricRoll, string>
+  auditLog!: Table<AuditLogEntry, string>
 
   constructor() {
     super('laxmi-fashion-v1')
@@ -194,6 +202,36 @@ export class LaxmiDB extends Dexie {
             if (s.maxCashierDiscountPct == null) s.maxCashierDiscountPct = 5
             if (s.upiVpa == null) s.upiVpa = ''
             if (s.barcodePrefix == null) s.barcodePrefix = ''
+            if (s.remnantThreshold == null) s.remnantThreshold = DEFAULT_REMNANT_THRESHOLD
+            if (s.razorpayKeyId == null) s.razorpayKeyId = ''
+            if (s.razorpayKeySecret == null) s.razorpayKeySecret = ''
+            if (s.razorpayWebhookSecret == null) s.razorpayWebhookSecret = ''
+          })
+      })
+    this.version(5)
+      .stores({
+        ...STORE_SCHEMA,
+        customers: 'id, phone, name, balance, updatedAt, deletedAt',
+        customerPayments: 'id, customerId, createdAt, saleId',
+        fabricRolls: 'id, productId, shade, lot, remainingMetres, updatedAt, deletedAt',
+        auditLog: 'id, action, entityType, entityId, createdAt, userId',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('store')
+          .toCollection()
+          .modify((s: Record<string, unknown>) => {
+            if (s.remnantThreshold == null) s.remnantThreshold = DEFAULT_REMNANT_THRESHOLD
+            if (s.razorpayKeyId == null) s.razorpayKeyId = ''
+            if (s.razorpayKeySecret == null) s.razorpayKeySecret = ''
+            if (s.razorpayWebhookSecret == null) s.razorpayWebhookSecret = ''
+          })
+        await tx
+          .table('sales')
+          .toCollection()
+          .modify((s: Record<string, unknown>) => {
+            if (s.creditAmount == null) s.creditAmount = 0
+            if (s.customerId == null) s.customerId = null
           })
       })
   }
@@ -299,6 +337,10 @@ export async function applySnapshot(snap: Snapshot) {
       db.meta,
       db.heldBills,
       db.stockLedger,
+      db.customers,
+      db.customerPayments,
+      db.fabricRolls,
+      db.auditLog,
     ],
     async () => {
       if (snap.store) {
@@ -311,6 +353,10 @@ export async function applySnapshot(snap: Snapshot) {
           upiVpa: snap.store.upiVpa || '',
           barcodePrefix: snap.store.barcodePrefix || '',
           gstin: snap.store.gstin || '',
+          remnantThreshold: snap.store.remnantThreshold ?? DEFAULT_REMNANT_THRESHOLD,
+          razorpayKeyId: snap.store.razorpayKeyId || '',
+          razorpayKeySecret: snap.store.razorpayKeySecret || '',
+          razorpayWebhookSecret: snap.store.razorpayWebhookSecret || '',
         })
       }
       for (const u of snap.users) {
@@ -358,6 +404,14 @@ export async function applySnapshot(snap: Snapshot) {
       await db.returnItems.clear()
       if (snap.returns.length) await db.returns.bulkPut(snap.returns)
       if (snap.returnItems.length) await db.returnItems.bulkPut(snap.returnItems)
+      await db.customers.clear()
+      if (snap.customers?.length) await db.customers.bulkPut(snap.customers)
+      await db.customerPayments.clear()
+      if (snap.customerPayments?.length) await db.customerPayments.bulkPut(snap.customerPayments)
+      await db.fabricRolls.clear()
+      if (snap.fabricRolls?.length) await db.fabricRolls.bulkPut(snap.fabricRolls)
+      // Audit is append-friendly: merge by id rather than wipe history on pull
+      if (snap.auditLog?.length) await db.auditLog.bulkPut(snap.auditLog)
       await db.meta.put({ key: 'lastPull', value: snap.serverTime })
     },
   )
@@ -401,6 +455,10 @@ export async function seedLocalIfEmpty() {
     gstin: '',
     maxCashierDiscount: 100,
     maxCashierDiscountPct: 5,
+    remnantThreshold: DEFAULT_REMNANT_THRESHOLD,
+    razorpayKeyId: '',
+    razorpayKeySecret: '',
+    razorpayWebhookSecret: '',
   })
 }
 
@@ -476,4 +534,56 @@ export async function enqueue(type: OutboxItem['type'], payload: unknown, id?: s
 
 export async function pendingCount() {
   return db.outbox.where('synced').equals(0).count()
+}
+
+/** Deduct metres from a fabric roll; also updates product.quantity. */
+export async function consumeFabricRoll(opts: {
+  rollId: string
+  metres: number
+  refType: string
+  refId: string
+}) {
+  const roll = await db.fabricRolls.get(opts.rollId)
+  if (!roll) throw new Error('Fabric roll not found')
+  const metres = Number(opts.metres) || 0
+  if (metres <= 0) return roll
+  const remaining = Math.round((Number(roll.remainingMetres) - metres) * 1000) / 1000
+  const t = new Date().toISOString()
+  await db.fabricRolls.update(opts.rollId, {
+    remainingMetres: remaining,
+    updatedAt: t,
+  })
+  const p = await db.products.get(roll.productId)
+  if (p) {
+    await db.products.update(roll.productId, {
+      quantity: Math.max(0, Number(p.quantity) - metres),
+      updatedAt: t,
+    })
+  }
+  await db.stockLedger.put({
+    id: crypto.randomUUID(),
+    productId: roll.productId,
+    colour: roll.shade || DEFAULT_COLOUR,
+    size: `ROLL:${roll.width}`,
+    delta: -metres,
+    unit: 'metre',
+    reason: 'sale',
+    refType: opts.refType,
+    refId: opts.refId,
+    createdAt: t,
+  })
+  // Sale sync owns server-side roll delta — do not enqueue here (avoids double-decrement).
+  return { ...roll, remainingMetres: remaining, updatedAt: t }
+}
+
+export async function productsWithRolls() {
+  const products = await productsWithSizes()
+  const rolls = await db.fabricRolls.filter((r) => !r.deletedAt).toArray()
+  const byP = new Map<string, FabricRoll[]>()
+  for (const r of rolls) {
+    const arr = byP.get(r.productId) || []
+    arr.push(r)
+    byP.set(r.productId, arr)
+  }
+  return products.map((p) => ({ ...p, rolls: byP.get(p.id) || [] }))
 }

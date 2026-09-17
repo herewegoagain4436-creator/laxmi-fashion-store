@@ -193,6 +193,7 @@ export function migrate() {
   ensureFourPriceColumns()
   ensureCategories()
   ensureV12Columns()
+  ensureV13Columns()
 }
 
 function tableColumns(table: string): Set<string> {
@@ -464,6 +465,8 @@ export function rowProduct(r: Record<string, unknown>) {
     lowStockThreshold: r.low_stock_threshold,
     fabricSellUnit: r.fabric_sell_unit,
     shade: r.shade ?? null,
+    fabricWidth: r.fabric_width ?? null,
+    remnantThreshold: r.remnant_threshold != null ? Number(r.remnant_threshold) : null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     deletedAt: r.deleted_at,
@@ -499,7 +502,8 @@ export function getSnapshot() {
     .prepare(
       `SELECT id, purchase_id as purchaseId, product_id as productId, product_name as productName,
               size, COALESCE(colour, 'Default') as colour, quantity, unit,
-              unit_cost as unitCost, line_total as lineTotal
+              unit_cost as unitCost, line_total as lineTotal,
+              fabric_width as fabricWidth, shade, lot, fabric_roll_id as fabricRollId
        FROM purchase_items`,
     )
     .all()
@@ -512,7 +516,9 @@ export function getSnapshot() {
               COALESCE(price_channel, 'retail') as priceChannel,
               customer_gstin as customerGstin, upi_ref as upiRef,
               COALESCE(taxable_total, 0) as taxableTotal, COALESCE(gst_total, 0) as gstTotal,
-              exchange_of_sale_id as exchangeOfSaleId
+              exchange_of_sale_id as exchangeOfSaleId,
+              customer_id as customerId, COALESCE(credit_amount, 0) as creditAmount,
+              void_reason as voidReason, voided_at as voidedAt, voided_by as voidedBy
        FROM sales ORDER BY datetime DESC`,
     )
     .all()
@@ -524,7 +530,8 @@ export function getSnapshot() {
               gst_rate as gstRate, taxable_amount as taxableAmount,
               cgst_amount as cgstAmount, sgst_amount as sgstAmount,
               COALESCE(line_kind, 'sale') as lineKind,
-              return_of_sale_item_id as returnOfSaleItemId
+              return_of_sale_item_id as returnOfSaleItemId,
+              fabric_roll_id as fabricRollId, fabric_width as fabricWidth
        FROM sale_items`,
     )
     .all()
@@ -541,6 +548,37 @@ export function getSnapshot() {
               product_name as productName, size, COALESCE(colour, 'Default') as colour,
               quantity, unit
        FROM return_items`,
+    )
+    .all()
+  const customers = db
+    .prepare(
+      `SELECT id, phone, name, gstin, balance, notes,
+              created_at as createdAt, updated_at as updatedAt, deleted_at as deletedAt
+       FROM customers`,
+    )
+    .all()
+  const customerPayments = db
+    .prepare(
+      `SELECT id, customer_id as customerId, amount, mode, sale_id as saleId, notes,
+              created_at as createdAt, created_by as createdBy
+       FROM customer_payments ORDER BY datetime(created_at) DESC`,
+    )
+    .all()
+  const fabricRolls = db
+    .prepare(
+      `SELECT id, product_id as productId, width, shade, lot,
+              remaining_metres as remainingMetres, initial_metres as initialMetres,
+              remnant_threshold as remnantThreshold, barcode,
+              purchase_id as purchaseId, purchase_item_id as purchaseItemId,
+              created_at as createdAt, updated_at as updatedAt, deleted_at as deletedAt
+       FROM fabric_rolls`,
+    )
+    .all()
+  const auditLog = db
+    .prepare(
+      `SELECT id, action, entity_type as entityType, entity_id as entityId,
+              user_id as userId, user_name as userName, detail, created_at as createdAt
+       FROM audit_log ORDER BY datetime(created_at) DESC LIMIT 2000`,
     )
     .all()
 
@@ -578,6 +616,13 @@ export function getSnapshot() {
           maxCashierDiscountPct:
             store.max_cashier_discount_pct != null ? Number(store.max_cashier_discount_pct) : 5,
           barcodePrefix: store.barcode_prefix != null ? String(store.barcode_prefix) : '',
+          remnantThreshold:
+            store.remnant_threshold != null ? Number(store.remnant_threshold) : 3,
+          razorpayKeyId: store.razorpay_key_id != null ? String(store.razorpay_key_id) : '',
+          razorpayKeySecret:
+            store.razorpay_key_secret != null ? String(store.razorpay_key_secret) : '',
+          razorpayWebhookSecret:
+            store.razorpay_webhook_secret != null ? String(store.razorpay_webhook_secret) : '',
         }
       : null,
     users,
@@ -590,6 +635,10 @@ export function getSnapshot() {
     saleItems,
     returns,
     returnItems,
+    customers,
+    customerPayments,
+    fabricRolls,
+    auditLog,
     serverTime: nowIso(),
   }
 }
@@ -686,4 +735,108 @@ export function ensureV12Columns() {
   db.prepare(
     `UPDATE store_profile SET gst_settings = ? WHERE gst_settings IS NULL OR gst_settings = ''`,
   ).run(defaultGst)
+}
+
+/** Customers, fabric rolls, audit, credit, Razorpay — v1.3 */
+export function ensureV13Columns() {
+  const addCol = (table: string, col: string, ddl: string) => {
+    const cols = tableColumns(table)
+    if (!cols.has(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+  }
+
+  addCol('products', 'fabric_width', 'fabric_width TEXT')
+  addCol('products', 'remnant_threshold', 'remnant_threshold REAL')
+
+  addCol('purchase_items', 'fabric_width', 'fabric_width TEXT')
+  addCol('purchase_items', 'shade', 'shade TEXT')
+  addCol('purchase_items', 'lot', 'lot TEXT')
+  addCol('purchase_items', 'fabric_roll_id', 'fabric_roll_id TEXT')
+
+  addCol('sales', 'customer_id', 'customer_id TEXT')
+  addCol('sales', 'credit_amount', 'credit_amount REAL DEFAULT 0')
+  addCol('sales', 'void_reason', 'void_reason TEXT')
+  addCol('sales', 'voided_at', 'voided_at TEXT')
+  addCol('sales', 'voided_by', 'voided_by TEXT')
+
+  addCol('sale_items', 'fabric_roll_id', 'fabric_roll_id TEXT')
+  addCol('sale_items', 'fabric_width', 'fabric_width TEXT')
+
+  addCol('store_profile', 'remnant_threshold', 'remnant_threshold REAL DEFAULT 3')
+  addCol('store_profile', 'razorpay_key_id', 'razorpay_key_id TEXT')
+  addCol('store_profile', 'razorpay_key_secret', 'razorpay_key_secret TEXT')
+  addCol('store_profile', 'razorpay_webhook_secret', 'razorpay_webhook_secret TEXT')
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS customers (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      name TEXT NOT NULL,
+      gstin TEXT,
+      balance REAL NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+
+    CREATE TABLE IF NOT EXISTS customer_payments (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT NOT NULL,
+      amount REAL NOT NULL,
+      mode TEXT NOT NULL,
+      sale_id TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      FOREIGN KEY (customer_id) REFERENCES customers(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cust_pay_customer ON customer_payments(customer_id);
+
+    CREATE TABLE IF NOT EXISTS fabric_rolls (
+      id TEXT PRIMARY KEY,
+      product_id TEXT NOT NULL,
+      width TEXT,
+      shade TEXT,
+      lot TEXT,
+      remaining_metres REAL NOT NULL DEFAULT 0,
+      initial_metres REAL NOT NULL DEFAULT 0,
+      remnant_threshold REAL NOT NULL DEFAULT 3,
+      barcode TEXT,
+      purchase_id TEXT,
+      purchase_item_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT,
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_rolls_product ON fabric_rolls(product_id);
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      user_id TEXT,
+      user_name TEXT,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+
+    CREATE TABLE IF NOT EXISTS payment_intents (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      provider_order_id TEXT,
+      sale_id TEXT,
+      amount REAL NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      status TEXT NOT NULL DEFAULT 'created',
+      qr_payload TEXT,
+      meta TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `)
 }

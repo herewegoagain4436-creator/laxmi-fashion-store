@@ -8,6 +8,7 @@ import {
   Settings,
   ShoppingBag,
   Truck,
+  Users,
   Warehouse,
 } from 'lucide-react'
 import { useAuth } from '../auth'
@@ -18,6 +19,7 @@ const items = [
   { to: '/inventory', label: 'Stock', icon: Warehouse, roles: ['owner', 'cashier'] },
   { to: '/purchases', label: 'Purchase', icon: ClipboardList, roles: ['owner'] },
   { to: '/suppliers', label: 'Suppliers', icon: Truck, roles: ['owner'] },
+  { to: '/customers', label: 'Udhaar', icon: Users, roles: ['owner'] },
   { to: '/returns', label: 'Returns', icon: RotateCcw, roles: ['owner', 'cashier'] },
   { to: '/reports', label: 'Reports', icon: BarChart3, roles: ['owner'] },
   { to: '/settings', label: 'Settings', icon: Settings, roles: ['owner'] },

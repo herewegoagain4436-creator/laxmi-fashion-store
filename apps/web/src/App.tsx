@@ -10,6 +10,7 @@ import { Reports } from './pages/Reports'
 import { Returns } from './pages/Returns'
 import { Settings } from './pages/Settings'
 import { Suppliers } from './pages/Suppliers'
+import { Customers } from './pages/Customers'
 
 function Guard({ children, owner }: { children: ReactElement; owner?: boolean }) {
   const { user, ready } = useAuth()
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="inventory" element={<Inventory />} />
         <Route path="purchases" element={<Guard owner><Purchases /></Guard>} />
         <Route path="suppliers" element={<Guard owner><Suppliers /></Guard>} />
+        <Route path="customers" element={<Guard owner><Customers /></Guard>} />
         <Route path="returns" element={<Returns />} />
         <Route path="reports" element={<Guard owner><Reports /></Guard>} />
         <Route path="settings" element={<Guard owner><Settings /></Guard>} />
