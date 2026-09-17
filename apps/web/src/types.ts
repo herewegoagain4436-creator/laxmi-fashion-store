@@ -73,6 +73,8 @@ export type StoreProfile = {
   maxCashierDiscount?: number
   /** Max % of subtotal a cashier may discount. */
   maxCashierDiscountPct?: number
+  /** Optional prefix prepended to auto-generated variant barcodes. */
+  barcodePrefix?: string
 }
 
 /** Colour × size stock row (variant). colour defaults to "Default" for migrated stock. */

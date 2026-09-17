@@ -1,16 +1,17 @@
 import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Printer, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { useAuth } from '../auth'
 import { SizeChips } from '../components/SizeChips'
 import { db, enqueue, getActiveCategories, getRulesForProduct, productsWithSizes } from '../db'
 import { baseTypeHint, inr, isLowStock, productStock, typeLabel } from '../lib/format'
 import { uid } from '../lib/ids'
 import { computePricesFromPurchase, defaultCategoryIdForType, normalizeProductPrices } from '../lib/pricing'
+import { printBarcodeLabels } from '../lib/printBarcodeLabels'
 import { flushOutbox } from '../sync'
-import type { Category, Product, ProductSize, ProductType } from '../types'
+import type { Category, Product, ProductSize, ProductType, StoreProfile } from '../types'
 import { DEFAULT_COLOUR, STANDARD_SIZES } from '../types'
-import { buildMatrix, normalizeColour, variantKey } from '../lib/variants'
+import { buildMatrix, makeVariantBarcode, normalizeColour, variantKey } from '../lib/variants'
 
 const emptyForm = (defaultCatId: string, baseType: ProductType) => ({
   name: '',
@@ -50,6 +51,10 @@ export function Inventory() {
   const [editId, setEditId] = useState<string | null>(null)
   const [sizeQtys, setSizeQtys] = useState<Record<string, string>>({})
   const [derivedTouched, setDerivedTouched] = useState(false)
+  const [barcodeMap, setBarcodeMap] = useState<Record<string, string>>({})
+  const [selectedKeys, setSelectedKeys] = useState<Record<string, boolean>>({})
+  const [labelMode, setLabelMode] = useState(false)
+  const store = useLiveQuery(() => db.store.get('store-1'), []) as StoreProfile | undefined
 
   const catById = useMemo(() => {
     const m = new Map<string, Category>()
@@ -65,10 +70,12 @@ export function Inventory() {
       const s = q.trim().toLowerCase()
       if (!s) return true
       const catName = catById.get(p.categoryId)?.name || ''
+      const barcodes = (p.sizes || []).map((x) => (x.barcode || '').toLowerCase())
       return (
         p.name.toLowerCase().includes(s) ||
         p.sku.toLowerCase().includes(s) ||
-        catName.toLowerCase().includes(s)
+        catName.toLowerCase().includes(s) ||
+        barcodes.some((b) => b.includes(s))
       )
     })
   }, [products, q, tab, catById])
@@ -84,13 +91,17 @@ export function Inventory() {
       const n = normalizeProductPrices(p as unknown as Record<string, unknown>)
       setEditId(p.id)
       const sq: Record<string, string> = {}
+      const bm: Record<string, string> = {}
       const cols = new Set<string>()
       for (const s of p.sizes || []) {
         const c = normalizeColour(s.colour)
         cols.add(c)
-        sq[variantKey(c, s.size)] = String(s.quantity)
+        const k = variantKey(c, s.size)
+        sq[k] = String(s.quantity)
+        if (s.barcode) bm[k] = s.barcode
       }
       setSizeQtys(sq)
+      setBarcodeMap(bm)
       const catId = p.categoryId || defaultCategoryIdForType(p.type)
       const cat = catById.get(catId)
       setForm({
@@ -115,6 +126,7 @@ export function Inventory() {
       const sq: Record<string, string> = {}
       for (const s of STANDARD_SIZES) sq[variantKey(DEFAULT_COLOUR, s)] = ''
       setSizeQtys(sq)
+      setBarcodeMap({})
       const first = categories[0]
       const catId = first?.id || defaultCategoryIdForType('garment')
       const base = first?.baseType || 'garment'
@@ -203,7 +215,20 @@ export function Inventory() {
           for (const c of uniqCols) qtyMap[variantKey(c, k)] = Number(v) || 0
         }
       }
-      sizes = buildMatrix(id, sku, uniqCols, szList, qtyMap)
+      // Ensure every variant has a barcode (generate missing); honour owner overrides
+      const bm: Record<string, string> = { ...barcodeMap }
+      for (const c of uniqCols) {
+        for (const sz of szList) {
+          const k = variantKey(c, sz)
+          if (!(bm[k] || '').trim()) {
+            bm[k] = makeVariantBarcode(sku, c, sz, store?.barcodePrefix)
+          }
+        }
+      }
+      sizes = buildMatrix(id, sku, uniqCols, szList, qtyMap, {
+        prefix: store?.barcodePrefix,
+        barcodeMap: bm,
+      })
     }
     const purchase = Number(form.purchasePrice) || 0
     const sale = Number(form.salePrice) || 0
@@ -270,13 +295,38 @@ export function Inventory() {
           <p className="text-sm text-slate-500">Stock, four prices, and categories</p>
         </div>
         {owner && (
-          <button
-            type="button"
-            onClick={() => openEdit()}
-            className="lf-btn-primary"
-          >
-            <Plus className="h-4 w-4" /> Add product
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={labelMode ? 'lf-btn-primary' : 'lf-btn-secondary'}
+              onClick={() => setLabelMode((v) => !v)}
+            >
+              <Printer className="h-4 w-4" /> {labelMode ? 'Selecting labels…' : 'Print labels'}
+            </button>
+            {labelMode && (
+              <button
+                type="button"
+                className="lf-btn-primary"
+                onClick={() => {
+                  const rows: Array<{ product: Product; variant: ProductSize }> = []
+                  for (const p of products) {
+                    for (const s of p.sizes || []) {
+                      const k = `${p.id}::${variantKey(normalizeColour(s.colour), s.size)}`
+                      if (selectedKeys[k] && (s.barcode || '').trim()) {
+                        rows.push({ product: p, variant: s })
+                      }
+                    }
+                  }
+                  printBarcodeLabels(rows, store?.name)
+                }}
+              >
+                Print selected
+              </button>
+            )}
+            <button type="button" onClick={() => openEdit()} className="lf-btn-primary">
+              <Plus className="h-4 w-4" /> Add product
+            </button>
+          </div>
         )}
       </div>
       <div className="relative mb-3">
@@ -327,17 +377,36 @@ export function Inventory() {
                     {p.type === 'garment' && (
                       <div className="mt-1 flex flex-wrap gap-1">
                         {(p.sizes || [])
-                          .filter((s) => s.quantity > 0)
-                          .map((s) => (
-                            <span
-                              key={`${s.colour}-${s.size}`}
-                              className="rounded bg-cream px-1.5 text-[11px]"
-                              title={s.barcode || ''}
-                            >
-                              {s.colour && s.colour !== DEFAULT_COLOUR ? `${s.colour}/` : ''}
-                              {s.size}:{s.quantity}
-                            </span>
-                          ))}
+                          .filter((s) => (labelMode ? true : s.quantity > 0))
+                          .map((s) => {
+                            const ck = `${p.id}::${variantKey(normalizeColour(s.colour), s.size)}`
+                            return (
+                              <label
+                                key={`${s.colour}-${s.size}`}
+                                className="inline-flex items-center gap-1 rounded bg-cream px-1.5 text-[11px]"
+                                title={s.barcode || ''}
+                              >
+                                {labelMode && (
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(selectedKeys[ck])}
+                                    onChange={(e) =>
+                                      setSelectedKeys((prev) => ({ ...prev, [ck]: e.target.checked }))
+                                    }
+                                  />
+                                )}
+                                <span>
+                                  {s.colour && s.colour !== DEFAULT_COLOUR ? `${s.colour}/` : ''}
+                                  {s.size}:{s.quantity}
+                                  {s.barcode ? (
+                                    <span className="ml-1 font-mono text-[10px] text-slate-500">
+                                      {s.barcode}
+                                    </span>
+                                  ) : null}
+                                </span>
+                              </label>
+                            )
+                          })}
                       </div>
                     )}
                   </td>
@@ -565,22 +634,52 @@ export function Inventory() {
                     }}
                     showStock={false}
                   />
-                  <div className="mt-2 max-h-48 space-y-1 overflow-auto">
+                  <div className="mt-2 max-h-64 space-y-2 overflow-auto">
                     {Object.keys(sizeQtys)
                       .sort()
-                      .map((key) => (
-                        <label key={key} className="flex items-center gap-2 text-xs">
-                          <span className="w-28 shrink-0 font-medium">{key.replace('::', ' / ')}</span>
-                          <input
-                            className="min-h-[36px] flex-1 rounded-lg border px-2"
-                            value={sizeQtys[key]}
-                            onChange={(e) => setSizeQtys((p) => ({ ...p, [key]: e.target.value }))}
-                          />
-                        </label>
-                      ))}
+                      .map((key) => {
+                        const [col, sz] = key.includes('::') ? key.split('::') : [DEFAULT_COLOUR, key]
+                        return (
+                          <div key={key} className="rounded-xl border border-brand-100 bg-white p-2">
+                            <div className="mb-1 flex items-center gap-2 text-xs font-semibold">
+                              <span className="w-28 shrink-0">{key.replace('::', ' / ')}</span>
+                              <input
+                                className="min-h-[36px] flex-1 rounded-lg border px-2"
+                                value={sizeQtys[key]}
+                                placeholder="Qty"
+                                onChange={(e) => setSizeQtys((p) => ({ ...p, [key]: e.target.value }))}
+                              />
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <input
+                                className="min-h-[36px] flex-1 rounded-lg border px-2 font-mono text-[11px]"
+                                value={barcodeMap[key] || ''}
+                                placeholder="Barcode"
+                                onChange={(e) =>
+                                  setBarcodeMap((p) => ({ ...p, [key]: e.target.value.toUpperCase() }))
+                                }
+                              />
+                              <button
+                                type="button"
+                                className="lf-btn-secondary min-h-[36px] px-2"
+                                title="Regenerate barcode"
+                                onClick={() => {
+                                  const sku = form.sku.trim() || 'SKU'
+                                  setBarcodeMap((p) => ({
+                                    ...p,
+                                    [key]: makeVariantBarcode(sku, col, sz, store?.barcodePrefix),
+                                  }))
+                                }}
+                              >
+                                <RefreshCw className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
                   </div>
                   <p className="mt-1 text-[11px] text-slate-500">
-                    Barcodes are auto-generated per colour × size on save.
+                    Barcodes auto-generate on save if blank. Owner can override or regenerate (Code128 / EAN).
                   </p>
                 </div>
               )}

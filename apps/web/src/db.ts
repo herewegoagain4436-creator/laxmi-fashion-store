@@ -193,6 +193,7 @@ export class LaxmiDB extends Dexie {
             if (s.maxCashierDiscount == null) s.maxCashierDiscount = 100
             if (s.maxCashierDiscountPct == null) s.maxCashierDiscountPct = 5
             if (s.upiVpa == null) s.upiVpa = ''
+            if (s.barcodePrefix == null) s.barcodePrefix = ''
           })
       })
   }
@@ -308,6 +309,7 @@ export async function applySnapshot(snap: Snapshot) {
           maxCashierDiscount: snap.store.maxCashierDiscount ?? 100,
           maxCashierDiscountPct: snap.store.maxCashierDiscountPct ?? 5,
           upiVpa: snap.store.upiVpa || '',
+          barcodePrefix: snap.store.barcodePrefix || '',
           gstin: snap.store.gstin || '',
         })
       }
@@ -395,6 +397,7 @@ export async function seedLocalIfEmpty() {
     pricingSettings: DEFAULT_PRICING_SETTINGS,
     gstSettings: DEFAULT_GST_SETTINGS,
     upiVpa: '',
+    barcodePrefix: '',
     gstin: '',
     maxCashierDiscount: 100,
     maxCashierDiscountPct: 5,

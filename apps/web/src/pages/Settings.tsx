@@ -68,6 +68,7 @@ export function Settings() {
   const [fabricRate, setFabricRate] = useState('5')
   const [maxCashierDiscount, setMaxCashierDiscount] = useState('100')
   const [maxCashierDiscountPct, setMaxCashierDiscountPct] = useState('5')
+  const [barcodePrefix, setBarcodePrefix] = useState('')
   const [syncMode, setSyncModeState] = useState<SyncMode>('offline')
   const [lanUrl, setLanUrl] = useState('')
   const [cloudUrl, setCloudUrlState] = useState('')
@@ -123,6 +124,7 @@ export function Settings() {
     setFabricRate(String(g.fabricRate))
     setMaxCashierDiscount(String(store.maxCashierDiscount ?? 100))
     setMaxCashierDiscountPct(String(store.maxCashierDiscountPct ?? 5))
+    setBarcodePrefix(store.barcodePrefix || '')
   }, [store])
 
   useEffect(() => {
@@ -291,6 +293,7 @@ export function Settings() {
       }),
       maxCashierDiscount: Number(maxCashierDiscount) || 0,
       maxCashierDiscountPct: Number(maxCashierDiscountPct) || 0,
+      barcodePrefix: barcodePrefix.trim().toUpperCase(),
     }
     await db.store.put(rec)
     await enqueue('store', rec, rec.id)
@@ -459,6 +462,19 @@ export function Settings() {
           onChange={(e) => setUpiVpa(e.target.value)}
           placeholder="shop@upi"
         />
+      </label>
+      <label className="block">
+        <span className="lf-label">Barcode prefix (optional)</span>
+        <input
+          className="lf-input font-mono uppercase"
+          value={barcodePrefix}
+          onChange={(e) => setBarcodePrefix(e.target.value)}
+          placeholder="e.g. LF or shop code"
+          maxLength={8}
+        />
+        <span className="mt-1 block text-[11px] text-slate-500">
+          Prepended to auto-generated colour×size barcodes (Code128). Leave blank for SKU-COLOUR-SIZE only.
+        </span>
       </label>
       <label className="block">
         <span className="lf-label">Shop GSTIN (optional, reports)</span>

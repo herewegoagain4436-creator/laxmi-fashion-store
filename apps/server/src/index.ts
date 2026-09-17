@@ -668,7 +668,7 @@ app.post('/api/sync', auth, (req: Authed, res) => {
         db.prepare(
           `UPDATE store_profile SET name=?, address=?, phone=?, city=?, pricing_settings=?,
             upi_vpa=?, gstin=?, gst_settings=?, max_cashier_discount=?, max_cashier_discount_pct=?,
-            updated_at=? WHERE id=?`,
+            barcode_prefix=?, updated_at=? WHERE id=?`,
         ).run(
           st.name,
           st.address ?? '',
@@ -680,6 +680,7 @@ app.post('/api/sync', auth, (req: Authed, res) => {
           st.gstSettings != null ? JSON.stringify(st.gstSettings) : null,
           st.maxCashierDiscount ?? 100,
           st.maxCashierDiscountPct ?? 5,
+          st.barcodePrefix ?? '',
           st.updatedAt || nowIso(),
           st.id || 'store-1',
         )

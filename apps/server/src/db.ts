@@ -562,6 +562,22 @@ export function getSnapshot() {
               return undefined
             }
           })(),
+          upiVpa: store.upi_vpa != null ? String(store.upi_vpa) : '',
+          gstin: store.gstin != null ? String(store.gstin) : '',
+          gstSettings: (() => {
+            try {
+              return store.gst_settings
+                ? JSON.parse(String(store.gst_settings))
+                : undefined
+            } catch {
+              return undefined
+            }
+          })(),
+          maxCashierDiscount:
+            store.max_cashier_discount != null ? Number(store.max_cashier_discount) : 100,
+          maxCashierDiscountPct:
+            store.max_cashier_discount_pct != null ? Number(store.max_cashier_discount_pct) : 5,
+          barcodePrefix: store.barcode_prefix != null ? String(store.barcode_prefix) : '',
         }
       : null,
     users,
@@ -640,6 +656,7 @@ export function ensureV12Columns() {
   addCol('store_profile', 'gst_settings', 'gst_settings TEXT')
   addCol('store_profile', 'max_cashier_discount', 'max_cashier_discount REAL DEFAULT 100')
   addCol('store_profile', 'max_cashier_discount_pct', 'max_cashier_discount_pct REAL DEFAULT 5')
+  addCol('store_profile', 'barcode_prefix', 'barcode_prefix TEXT')
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS stock_ledger (

@@ -15,11 +15,18 @@ export function makeVariantId(productId: string, colour: string, size: string) {
   return `${productId}-${c}-${s}`
 }
 
-export function makeVariantBarcode(productSku: string, colour: string, size: string) {
+export function makeVariantBarcode(
+  productSku: string,
+  colour: string,
+  size: string,
+  prefix?: string | null,
+) {
   const sku = (productSku || 'SKU').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 12)
   const c = normalizeColour(colour).replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'DEF'
   const s = size.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6) || 'FS'
-  return `${sku}-${c}-${s}`
+  const body = `${sku}-${c}-${s}`
+  const pfx = (prefix || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8)
+  return pfx ? `${pfx}-${body}` : body
 }
 
 export function normalizeVariant(raw: Partial<ProductSize> & { productId: string; size: string }): ProductSize {
@@ -70,6 +77,11 @@ export function buildMatrix(
   colours: string[],
   sizes: string[],
   qtyMap?: Record<string, number>,
+  opts?: {
+    prefix?: string | null
+    /** Preserve / override barcodes keyed by colour::size */
+    barcodeMap?: Record<string, string>
+  },
 ): ProductSize[] {
   const out: ProductSize[] = []
   const cols = colours.length ? colours.map(normalizeColour) : [DEFAULT_COLOUR]
@@ -77,13 +89,14 @@ export function buildMatrix(
   for (const colour of cols) {
     for (const size of szs) {
       const key = variantKey(colour, size)
+      const existingBc = opts?.barcodeMap?.[key]?.trim()
       out.push(
         normalizeVariant({
           productId,
           colour,
           size,
           quantity: qtyMap?.[key] ?? 0,
-          barcode: makeVariantBarcode(productSku, colour, size),
+          barcode: existingBc || makeVariantBarcode(productSku, colour, size, opts?.prefix),
           variantSku: `${productSku}-${normalizeColour(colour).slice(0, 4)}-${size}`.toUpperCase(),
         }),
       )

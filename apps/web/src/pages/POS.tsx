@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import {
   ArrowLeftRight,
+  Camera,
   Pause,
   Play,
   Printer,
@@ -9,6 +10,14 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
+import { CameraBarcodeScanner } from '../components/CameraBarcodeScanner'
+import {
+  attachHidScanListener,
+  cartLineKey,
+  findByBarcode,
+  playScanBeep,
+  type BarcodeHit,
+} from '../lib/barcodeScan'
 import { useAuth } from '../auth'
 import { ColourSwatches } from '../components/ColourSwatches'
 import { MetreKeypad } from '../components/MetreKeypad'
@@ -104,6 +113,15 @@ export function POS() {
   const [showExchange, setShowExchange] = useState(false)
   const [exchangeQuery, setExchangeQuery] = useState('')
   const [showHold, setShowHold] = useState(false)
+  const [cameraOpen, setCameraOpen] = useState(false)
+  const [scanToast, setScanToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [disambig, setDisambig] = useState<BarcodeHit[] | null>(null)
+  const productsRef = useRef(products)
+  productsRef.current = products
+  const cartRef = useRef(cart)
+  cartRef.current = cart
+  const wholesaleRef = useRef(wholesaleMode)
+  wholesaleRef.current = wholesaleMode
 
   const gstSettings = normalizeGstSettings(store?.gstSettings || DEFAULT_GST_SETTINGS)
   const priceChannel: PriceChannel = wholesaleMode ? 'wholesale' : 'retail'
@@ -126,19 +144,6 @@ export function POS() {
     })
   }, [products, q, catFilter, categories])
 
-  // Exact barcode hit → open that variant
-  useEffect(() => {
-    const s = q.trim()
-    if (s.length < 4) return
-    for (const p of products) {
-      const hit = p.sizes?.find((v) => (v.barcode || '').toLowerCase() === s.toLowerCase())
-      if (hit) {
-        openProduct(p, hit.colour, hit.size)
-        setQ('')
-        return
-      }
-    }
-  }, [q]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const gstMap = useMemo(
     () =>
@@ -215,6 +220,116 @@ export function POS() {
     }
     setMobileTab('cart')
   }
+
+
+  function showToast(kind: 'ok' | 'err', text: string) {
+    setScanToast({ kind, text })
+    window.setTimeout(() => setScanToast(null), 2200)
+  }
+
+  function addVariantToCart(product: Product, colour?: string, size?: string, qty = 1) {
+    const prices = normalizeProductPrices(product as unknown as Record<string, unknown>)
+    const rate = wholesaleRef.current ? prices.wholesalePrice : prices.salePrice
+    const unit = product.type === 'fabric' ? 'metre' : 'piece'
+    const col = product.type === 'garment' ? normalizeColour(colour) : DEFAULT_COLOUR
+    const sz = product.type === 'garment' ? size : undefined
+    const variant = product.type === 'garment' ? findVariant(product.sizes, col, sz) : undefined
+    const avail = availableStock(product, sz, col)
+    const key = cartLineKey(product.id, col, sz, unit)
+    const already = cartRef.current
+      .filter((c) => c.lineKind === 'sale' && c.key === key)
+      .reduce((a, c) => a + stockQtyOfLine(c.unit, c.quantity), 0)
+    if (avail - already + 1e-9 < qty) {
+      playScanBeep('err')
+      showToast('err', `Not enough stock for ${product.name} (avail ${avail})`)
+      setErr(`Not enough stock (available ${avail})`)
+      return false
+    }
+    setCart((prev) => {
+      const i = prev.findIndex((x) => x.key === key)
+      if (i >= 0) {
+        const next = [...prev]
+        const q2 = next[i].quantity + qty
+        next[i] = { ...next[i], quantity: q2, lineTotal: round2(q2 * rate) }
+        return next
+      }
+      return [
+        ...prev,
+        {
+          key,
+          productId: product.id,
+          productName: product.name,
+          productType: product.type,
+          sku: variant?.variantSku || product.sku,
+          size: sz,
+          colour: col,
+          shade: product.type === 'fabric' ? product.shade || undefined : undefined,
+          barcode: variant?.barcode || undefined,
+          quantity: qty,
+          unit,
+          rate,
+          lineTotal: round2(qty * rate),
+          mrp: prices.mrp,
+          lineKind: 'sale' as const,
+        },
+      ]
+    })
+    setErr('')
+    setMobileTab('cart')
+    return true
+  }
+
+  const handleBarcodeScan = useCallback(
+    (raw: string) => {
+      const code = raw.trim()
+      if (!code) return
+      const hits = findByBarcode(productsRef.current, code)
+      if (!hits.length) {
+        playScanBeep('err')
+        showToast('err', `Barcode not found: ${code}`)
+        setErr(`Barcode not found: ${code}`)
+        return
+      }
+      if (hits.length > 1) {
+        playScanBeep('err')
+        setDisambig(hits)
+        showToast('err', `${hits.length} matches — pick one`)
+        return
+      }
+      const hit = hits[0]
+      // Exact variant with colour+size → add directly (increment if duplicate)
+      if (hit.product.type === 'garment' && hit.variant?.size) {
+        const ok = addVariantToCart(hit.product, hit.variant.colour, hit.variant.size, 1)
+        if (ok) {
+          playScanBeep('ok')
+          showToast('ok', `Added ${hit.product.name} · ${hit.variant.size}`)
+        }
+        setCameraOpen(false)
+        return
+      }
+      // Fabric/saree or parent-only → open picker
+      if (hit.product.type !== 'garment') {
+        openProduct(hit.product)
+        playScanBeep('ok')
+        showToast('ok', `Opened ${hit.product.name}`)
+        setCameraOpen(false)
+        return
+      }
+      openProduct(hit.product, hit.variant?.colour, hit.variant?.size)
+      playScanBeep('ok')
+      showToast('ok', `Select size/colour for ${hit.product.name}`)
+      setCameraOpen(false)
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  )
+
+  useEffect(() => {
+    return attachHidScanListener({
+      onScan: handleBarcodeScan,
+      shouldIgnore: () => Boolean(cameraOpen || done || showExchange || showHold),
+    })
+  }, [handleBarcodeScan, cameraOpen, done, showExchange, showHold])
 
   function addPicked() {
     if (!pick) return
@@ -561,16 +676,38 @@ export function POS() {
 
   const catalogPane = (
     <section className="min-w-0">
-      <div className="relative mb-3">
-        <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-        <input
-          ref={searchRef}
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search name, SKU, barcode…"
-          className="lf-input min-h-[48px] pl-10 shadow-soft"
-          autoFocus
-        />
+      <div className="mb-3 flex gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            ref={searchRef}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const s = q.trim()
+                if (s.length >= 3) {
+                  e.preventDefault()
+                  handleBarcodeScan(s)
+                  setQ('')
+                }
+              }
+            }}
+            placeholder="Search or scan barcode…"
+            className="lf-input min-h-[48px] pl-10 shadow-soft"
+            autoFocus
+            data-scan-capture="1"
+          />
+        </div>
+        <button
+          type="button"
+          className="lf-btn-primary min-h-[48px] min-w-[48px] shrink-0 px-3"
+          title="Camera barcode scan"
+          onClick={() => setCameraOpen(true)}
+        >
+          <Camera className="h-5 w-5" />
+          <span className="hidden sm:inline">Scan</span>
+        </button>
       </div>
       <div className="mb-3 flex flex-wrap gap-2">
         <button
@@ -859,6 +996,62 @@ export function POS() {
         <div className={mobileTab === 'catalog' ? 'block' : 'hidden lg:block'}>{catalogPane}</div>
         <div className={mobileTab === 'cart' ? 'block' : 'hidden lg:block'}>{billPane}</div>
       </div>
+
+      {scanToast && (
+        <div
+          className={`fixed left-1/2 top-16 z-[90] max-w-sm -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-semibold shadow-lg ${
+            scanToast.kind === 'ok' ? 'bg-emerald-700 text-white' : 'bg-red-600 text-white'
+          }`}
+        >
+          {scanToast.text}
+        </div>
+      )}
+
+      <CameraBarcodeScanner
+        open={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        onDetect={handleBarcodeScan}
+      />
+
+      {disambig && (
+        <div className="lf-modal-backdrop z-[85]">
+          <div className="lf-modal">
+            <h2 className="mb-2 text-lg font-bold text-brand-800">Multiple barcode matches</h2>
+            <p className="mb-3 text-sm text-slate-600">Pick the correct variant to add to the bill.</p>
+            <div className="max-h-72 space-y-2 overflow-auto">
+              {disambig.map((h, i) => (
+                <button
+                  key={`${h.product.id}-${h.variant?.id || i}`}
+                  type="button"
+                  className="lf-btn-secondary w-full justify-start text-left"
+                  onClick={() => {
+                    setDisambig(null)
+                    if (h.product.type === 'garment' && h.variant?.size) {
+                      const ok = addVariantToCart(h.product, h.variant.colour, h.variant.size, 1)
+                      if (ok) {
+                        playScanBeep('ok')
+                        showToast('ok', `Added ${h.product.name}`)
+                      }
+                    } else {
+                      openProduct(h.product, h.variant?.colour, h.variant?.size)
+                    }
+                  }}
+                >
+                  <span className="font-semibold">{h.product.name}</span>
+                  <span className="text-xs text-slate-500">
+                    {[h.variant?.colour, h.variant?.size, h.variant?.barcode || h.product.sku]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <button type="button" className="lf-btn-ghost mt-3 w-full" onClick={() => setDisambig(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {pick && (
         <div className="lf-modal-backdrop">

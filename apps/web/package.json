@@ -9,8 +9,10 @@
     "preview": "vite preview --host"
   },
   "dependencies": {
+    "@zxing/browser": "^0.2.1",
     "dexie": "^4.0.11",
     "dexie-react-hooks": "^1.1.7",
+    "jsbarcode": "^3.12.3",
     "lucide-react": "^0.469.0",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
